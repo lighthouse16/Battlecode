@@ -21,6 +21,10 @@ def generate_match_id(normalized_spec: dict[str, Any]) -> str:
         "side_assignment": normalized_spec.get("side_assignment"),
         "time_limit_ms": normalized_spec.get("time_limit_ms"),
     }
+    if normalized_spec.get("tournament_id"):
+        spec_copy["tournament_id"] = normalized_spec.get("tournament_id")
+    if normalized_spec.get("experiment_id"):
+        spec_copy["experiment_id"] = normalized_spec.get("experiment_id")
     digest = hash_dict(spec_copy)
     return f"m_{digest[:16]}"
 

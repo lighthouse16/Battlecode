@@ -28,6 +28,7 @@ class BotRegistry:
         experiment_id: str | None = None,
         hypothesis: str | None = None,
         parent_artifact_id: str | None = None,
+        entrypoint: str | None = None,
     ) -> BotArtifact:
         """Register and snapshot a bot from source path."""
         artifact = create_bot_artifact(
@@ -38,6 +39,7 @@ class BotRegistry:
             experiment_id=experiment_id,
             hypothesis=hypothesis,
             parent_artifact_id=parent_artifact_id,
+            entrypoint=entrypoint,
         )
         self.db.save_artifact(artifact)
         return artifact
@@ -71,15 +73,17 @@ class BotRegistry:
     def update_champion_manifest(
         self,
         artifact_id: str,
-        experiment_id: str,
+        experiment_id: str | None,
         updated_at: str,
         reason: str = "",
+        previous_champion_id: str | None = None,
     ) -> dict[str, Any]:
         """Update champion manifest to point to a new immutable artifact."""
         manifest_path = get_champion_manifest_path()
         payload = {
             "champion_artifact_id": artifact_id,
             "experiment_id": experiment_id,
+            "previous_champion_id": previous_champion_id,
             "updated_at": updated_at,
             "reason": reason,
         }

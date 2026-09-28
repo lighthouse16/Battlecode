@@ -127,21 +127,24 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(BASE_SCHEMA)
 
-        # Check existing columns in matches and add missing ones
         cur = conn.cursor()
+
+        # 1. Matches table migrations
         cur.execute("PRAGMA table_info(matches)")
         existing_cols = {row[1] for row in cur.fetchall()}
-
-        new_cols = [
+        new_match_cols = [
             ("pair_id", "TEXT"),
             ("worker_id", "TEXT"),
+            ("lease_token", "TEXT"),
             ("lease_timestamp", "TEXT"),
             ("lease_expires_at", "TEXT"),
+            ("last_heartbeat", "TEXT"),
             ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
             ("max_attempts", "INTEGER NOT NULL DEFAULT 3"),
             ("last_infrastructure_error", "TEXT"),
+            ("retry_classification", "TEXT"),
         ]
-        for col_name, col_type in new_cols:
+        for col_name, col_type in new_match_cols:
             if col_name not in existing_cols:
                 try:
                     conn.execute(f"ALTER TABLE matches ADD COLUMN {col_name} {col_type}")
@@ -149,15 +152,94 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
                     pass
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_pair ON matches(pair_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_lease ON matches(lease_token)")
 
+        # 2. Artifacts table migrations
+        cur.execute("PRAGMA table_info(artifacts)")
+        existing_art_cols = {row[1] for row in cur.fetchall()}
+        new_art_cols = [
+            ("entrypoint_relpath", "TEXT NOT NULL DEFAULT ''"),
+            ("manifest_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("manifest_hash", "TEXT NOT NULL DEFAULT ''"),
+        ]
+        for col_name, col_type in new_art_cols:
+            if col_name not in existing_art_cols:
+                try:
+                    conn.execute(f"ALTER TABLE artifacts ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+
+        # 3. Promotions table migrations
         cur.execute("PRAGMA table_info(promotions)")
         existing_prom_cols = {row[1] for row in cur.fetchall()}
-        if "override_acknowledgement" not in existing_prom_cols:
-            try:
-                conn.execute("ALTER TABLE promotions ADD COLUMN override_acknowledgement TEXT")
-            except Exception:
-                pass
+        new_prom_cols = [
+            ("override_acknowledgement", "TEXT"),
+            ("previous_champion_id", "TEXT"),
+            ("gate_violations_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("artifact_manifest_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("config_hash", "TEXT NOT NULL DEFAULT ''"),
+        ]
+        for col_name, col_type in new_prom_cols:
+            if col_name not in existing_prom_cols:
+                try:
+                    conn.execute(f"ALTER TABLE promotions ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
 
-        cur.execute("SELECT version FROM schema_version WHERE version = 2")
-        if not cur.fetchone():
-            cur.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (2)")
+        cur.execute("SELECT sql FROM sqlite_master WHERE name='promotions'")
+        prom_row = cur.fetchone()
+        if prom_row and (
+            "experiment_id TEXT NOT NULL" in prom_row[0] or "REFERENCES experiments" in prom_row[0]
+        ):
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("""
+            CREATE TABLE promotions_v3 (
+                promotion_id TEXT PRIMARY KEY,
+                experiment_id TEXT,
+                artifact_id TEXT NOT NULL,
+                promoted_at TEXT NOT NULL,
+                promoted_by TEXT NOT NULL DEFAULT 'system',
+                mode TEXT NOT NULL DEFAULT 'MANUAL',
+                manifest_snapshot_json TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                override_acknowledgement TEXT,
+                previous_champion_id TEXT,
+                gate_violations_json TEXT NOT NULL DEFAULT '[]',
+                artifact_manifest_hash TEXT NOT NULL DEFAULT '',
+                config_hash TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
+            )
+            """)
+            conn.execute("""
+            INSERT INTO promotions_v3 (
+                promotion_id, experiment_id, artifact_id, promoted_at, promoted_by, mode,
+                manifest_snapshot_json, reason, override_acknowledgement, previous_champion_id,
+                gate_violations_json, artifact_manifest_hash, config_hash
+            )
+            SELECT
+                promotion_id, experiment_id, artifact_id, promoted_at, promoted_by, mode,
+                manifest_snapshot_json, reason, override_acknowledgement, previous_champion_id,
+                gate_violations_json, artifact_manifest_hash, config_hash
+            FROM promotions
+            """)
+            conn.execute("DROP TABLE promotions")
+            conn.execute("ALTER TABLE promotions_v3 RENAME TO promotions")
+            conn.execute("PRAGMA foreign_keys=ON")
+
+        # 4. Experiments table migrations
+        cur.execute("PRAGMA table_info(experiments)")
+        existing_exp_cols = {row[1] for row in cur.fetchall()}
+        new_exp_cols = [
+            ("evaluation_config_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("evaluation_config_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("opponent_pool_config_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("opponent_pool_config_hash", "TEXT NOT NULL DEFAULT ''"),
+        ]
+        for col_name, col_type in new_exp_cols:
+            if col_name not in existing_exp_cols:
+                try:
+                    conn.execute(f"ALTER TABLE experiments ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+
+        cur.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (3)")

@@ -15,65 +15,199 @@ from typing import Any
 import psutil
 
 
+def is_process_active(pid: int) -> bool:
+    """Check if process exists and is actively executing (not dead or zombie)."""
+    if not psutil.pid_exists(pid):
+        return False
+    try:
+        p = psutil.Process(pid)
+        status = p.status()
+        if status in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+            return False
+        return p.is_running()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+
+
 def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0) -> None:
-    """Terminate a process and all of its spawned child processes recursively."""
-    if proc.poll() is not None:
+    """Terminate a process and all spawned child processes recursively.
+
+    Escalates from graceful termination to SIGKILL / TerminateProcess.
+    Reaps terminated child processes and handles already-exited parents safely.
+    """
+    pid = proc.pid
+    if not pid:
         return
 
-    pid = proc.pid
+    # 1. Discover all processes in the tree before signaling
+    procs_to_clean: list[psutil.Process] = []
     try:
-        parent = psutil.Process(pid)
-        children = parent.children(recursive=True)
-        # Kill children first
-        for child in children:
-            try:
-                child.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        parent.kill()
+        parent_ps = psutil.Process(pid)
+        children = parent_ps.children(recursive=True)
+        # Put children first so leaf processes are handled before parent
+        procs_to_clean = children + [parent_ps]
     except (psutil.NoSuchProcess, psutil.AccessDenied):
+        # Parent already exited; continue to cleanup any remaining processes
         pass
 
+    # 2. Phase 1: Graceful termination
+    if platform.system() != "Windows":
+        try:
+            import os
+            import signal
+
+            getpgid = getattr(os, "getpgid", None)
+            killpg = getattr(os, "killpg", None)
+            if getpgid and killpg:
+                pgid = getpgid(pid)
+                if pgid > 0:
+                    killpg(pgid, signal.SIGTERM)
+        except Exception:
+            pass
+
+    for p in procs_to_clean:
+        try:
+            p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # Wait bounded time for graceful termination
+    half_timeout = max(0.05, timeout_seconds * 0.4)
+    _, still_alive = psutil.wait_procs(procs_to_clean, timeout=half_timeout)
+
+    # 3. Phase 2: Force kill for any process that ignored SIGTERM or is still running
+    if still_alive:
+        if platform.system() != "Windows":
+            try:
+                import os
+                import signal
+
+                getpgid = getattr(os, "getpgid", None)
+                killpg = getattr(os, "killpg", None)
+                sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                if getpgid and killpg:
+                    pgid = getpgid(pid)
+                    if pgid > 0:
+                        killpg(pgid, sigkill)
+            except Exception:
+                pass
+
+        for p in still_alive:
+            try:
+                p.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        psutil.wait_procs(still_alive, timeout=half_timeout)
+
+    # 4. Reap parent process via Popen
     try:
-        proc.kill()
-        proc.wait(timeout=timeout_seconds)
+        proc.poll()
+        proc.wait(timeout=0.1)
     except Exception:
         pass
+
+    # 5. On POSIX, wait/reap any remaining zombies
+    if platform.system() != "Windows":
+        try:
+            import os
+
+            waitpid = getattr(os, "waitpid", None)
+            wnohang = getattr(os, "WNOHANG", 1)
+            if waitpid:
+                while True:
+                    wpid, _ = waitpid(-1, wnohang)
+                    if wpid <= 0:
+                        break
+        except Exception:
+            pass
 
 
 def check_memory_limit_support() -> tuple[bool, str]:
     """Check whether portable memory limits are supported on this operating system."""
     if platform.system() in ("Linux", "Darwin"):
-        return True, "resource.setrlimit supported"
+        return True, "resource.setrlimit supported on POSIX child launch"
     return (
         False,
         "Windows Job Object memory limits require win32 extensions (unsupported in stdlib)",
     )
 
 
+def get_memory_enforcement_details() -> dict[str, Any]:
+    """Return structured memory enforcement status for system doctor and diagnostics."""
+    is_posix = platform.system() in ("Linux", "Darwin")
+    return {
+        "detectable": is_posix,
+        "configured": True,
+        "enforced_and_tested": is_posix,
+        "status": "ENFORCED" if is_posix else "UNSUPPORTED",
+        "platform": platform.system(),
+        "mechanism": (
+            "resource.setrlimit(RLIMIT_AS)"
+            if is_posix
+            else "None (Windows stdlib lacks Job Objects)"
+        ),
+        "detail": (
+            "resource.setrlimit supported on POSIX child launch"
+            if is_posix
+            else "Windows Job Object memory limits require win32 extensions (unsupported in stdlib)"
+        ),
+    }
+
+
 class BotSubprocess:
     """Manages an isolated bot subprocess running over stdin/stdout line-protocol."""
 
-    def __init__(self, entrypoint_path: Path, cwd: Path, env: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        entrypoint_path: Path,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        memory_limit_mb: int = 512,
+    ) -> None:
         self.entrypoint_path = entrypoint_path
         self.cwd = cwd
         self.env = env
+        self.memory_limit_mb = memory_limit_mb
         self.proc: subprocess.Popen | None = None
         self.stdout_queue: queue.Queue[tuple[str | None, str | None]] = queue.Queue()
         self.stderr_lines: list[str] = []
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self.is_alive = False
+        self.turn_durations_ms: list[float] = []
 
     def start(self) -> None:
-        """Launch the bot in an unbuffered subprocess."""
-        cmd = [sys.executable, "-u", str(self.entrypoint_path)]
+        """Launch the bot in an unbuffered subprocess with process group isolation."""
+        extra_kwargs: dict[str, Any] = {}
+        if platform.system() == "Windows":
+            extra_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            extra_kwargs["start_new_session"] = True
+
+        # Safe child launch mechanism for POSIX memory enforcement
+        if platform.system() in ("Linux", "Darwin") and self.memory_limit_mb > 0:
+            mem_bytes = int(self.memory_limit_mb * 1024 * 1024)
+            cmd = [
+                sys.executable,
+                "-u",
+                "-c",
+                (
+                    f"import resource, runpy, sys; "
+                    f"resource.setrlimit(resource.RLIMIT_AS, ({mem_bytes}, {mem_bytes})); "
+                    f"sys.argv = [{repr(str(self.entrypoint_path))}] + sys.argv[1:]; "
+                    f"runpy.run_path({repr(str(self.entrypoint_path))}, run_name='__main__')"
+                ),
+            ]
+        else:
+            cmd = [sys.executable, "-u", str(self.entrypoint_path)]
+
         merged_env = None
         if self.env:
             import os
 
             merged_env = os.environ.copy()
             merged_env.update(self.env)
+
         self.proc = subprocess.Popen(
             cmd,
             cwd=str(self.cwd),
@@ -83,6 +217,7 @@ class BotSubprocess:
             text=True,
             bufsize=1,  # Line buffered
             env=merged_env,
+            **extra_kwargs,
         )
         self.is_alive = True
 
@@ -141,6 +276,7 @@ class BotSubprocess:
         except Exception as e:
             self.is_alive = False
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            self.turn_durations_ms.append(elapsed_ms)
             return None, {
                 "timed_out": False,
                 "crashed": True,
@@ -154,9 +290,11 @@ class BotSubprocess:
         try:
             out_line, err = self.stdout_queue.get(timeout=timeout_seconds)
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            self.turn_durations_ms.append(elapsed_ms)
         except queue.Empty:
             # HARD TIMEOUT: Kill process immediately
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            self.turn_durations_ms.append(elapsed_ms)
             self.stop()
             return None, {
                 "timed_out": True,
@@ -210,6 +348,35 @@ class BotSubprocess:
                 "elapsed_ms": elapsed_ms,
             }
 
+    def get_runtime_statistics(self, per_turn_limit_ms: int = 5000) -> dict[str, Any]:
+        """Compute p50, p90, p99 and runtime headroom across recorded turns."""
+        if not self.turn_durations_ms:
+            return {
+                "p50": 0.0,
+                "p90": 0.0,
+                "p99": 0.0,
+                "headroom": 1.0,
+                "turn_count": 0,
+            }
+        s = sorted(self.turn_durations_ms)
+        n = len(s)
+
+        def _pct(p: float) -> float:
+            idx = int(round(p * (n - 1)))
+            return round(s[min(max(0, idx), n - 1)], 2)
+
+        p50 = _pct(0.50)
+        p90 = _pct(0.90)
+        p99 = _pct(0.99)
+        headroom = round(max(0.0, 1.0 - (p99 / max(1.0, float(per_turn_limit_ms)))), 4)
+        return {
+            "p50": p50,
+            "p90": p90,
+            "p99": p99,
+            "headroom": headroom,
+            "turn_count": n,
+        }
+
     def stop(self) -> None:
         """Safely terminate bot process tree and close pipes."""
         self.is_alive = False
@@ -222,7 +389,7 @@ class BotSubprocess:
                         self.proc.stdin.close()
                     except Exception:
                         pass
-                terminate_process_tree(self.proc)
+                terminate_process_tree(self.proc, timeout_seconds=1.5)
             except Exception:
                 pass
             finally:

@@ -69,3 +69,39 @@ def paired_bootstrap_difference(
     upper_idx = min(upper_idx, num_samples - 1)
 
     return (mean_diff, boot_means[lower_idx], boot_means[upper_idx])
+
+
+def weighted_paired_bootstrap_difference(
+    diffs: Sequence[float],
+    weights: Sequence[float],
+    num_samples: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Compute weighted paired bootstrap difference mean and confidence interval."""
+    n = len(diffs)
+    if n == 0 or len(weights) != n:
+        return (0.0, 0.0, 0.0)
+
+    total_w = sum(weights)
+    if total_w <= 0:
+        return paired_bootstrap_difference(diffs, num_samples, confidence, seed)
+
+    norm_w = [w / total_w for w in weights]
+    mean_diff = sum(d * w for d, w in zip(diffs, norm_w))
+    if n < 2:
+        return (mean_diff, mean_diff, mean_diff)
+
+    rng = random.Random(seed)
+    boot_means: list[float] = []
+
+    for _ in range(num_samples):
+        sample = rng.choices(diffs, weights=norm_w, k=n)
+        boot_means.append(sum(sample) / n)
+
+    boot_means.sort()
+    alpha = (1.0 - confidence) / 2.0
+    lower_idx = int(alpha * num_samples)
+    upper_idx = min(int((1.0 - alpha) * num_samples), num_samples - 1)
+
+    return (mean_diff, boot_means[lower_idx], boot_means[upper_idx])

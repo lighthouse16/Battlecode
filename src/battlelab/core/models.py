@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Any
 
@@ -59,6 +59,20 @@ class FailureClassification:
 
 
 @dataclass
+class ResolvedOpponent:
+    config_id: str
+    artifact_id: str
+    name: str = ""
+    group: str = "general"
+    weight: float = 1.0
+    tags: list[str] = field(default_factory=list)
+    role: str = "opponent"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Capability:
     can_run_local: bool = True
     can_run_remote: bool = False
@@ -94,13 +108,18 @@ class BotArtifact:
     tags: list[str] = field(default_factory=list)
     build_result: dict[str, Any] = field(default_factory=dict)
     build_logs: str = ""
+    entrypoint_relpath: str = ""
+    manifest: dict[str, Any] = field(default_factory=dict)
+    manifest_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BotArtifact:
-        return cls(**data)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)
 
 
 @dataclass
@@ -114,8 +133,11 @@ class MatchSpec:
     seed: int
     side_assignment: dict[str, str] = field(default_factory=lambda: {"A": "side_0", "B": "side_1"})
     execution_mode: str = "local"
-    time_limit_ms: int = 10000
+    per_turn_limit_ms: int = 5000
+    match_wall_clock_limit_ms: int = 60000
     memory_limit_mb: int = 512
+    cpu_limit_cores: float | None = None
+    time_limit_ms: int = 5000  # Backwards compatibility alias for per_turn_limit_ms
     config_hash: str = ""
     retry_attempt: int = 0
     max_attempts: int = 3
@@ -123,12 +145,21 @@ class MatchSpec:
     experiment_id: str | None = None
     tournament_id: str | None = None
 
+    def __post_init__(self) -> None:
+        # Keep time_limit_ms and per_turn_limit_ms synchronized
+        if self.time_limit_ms != 5000 and self.per_turn_limit_ms == 5000:
+            self.per_turn_limit_ms = self.time_limit_ms
+        elif self.per_turn_limit_ms != 5000 and self.time_limit_ms == 5000:
+            self.time_limit_ms = self.per_turn_limit_ms
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MatchSpec:
-        return cls(**data)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)
 
 
 @dataclass

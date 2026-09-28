@@ -5,13 +5,23 @@ from __future__ import annotations
 import statistics
 from typing import Any
 
-from battlelab.analysis.confidence import paired_bootstrap_difference, wilson_score_interval
+from battlelab.analysis.confidence import (
+    paired_bootstrap_difference,
+    weighted_paired_bootstrap_difference,
+    wilson_score_interval,
+)
 
 
 def calculate_tournament_metrics(
     matches: list[dict[str, Any]], focus_bot_id: str | None = None
 ) -> dict[str, Any]:
     """Calculate aggregate and segmented metrics without polluting loss counts with infra failures."""
+    if focus_bot_id:
+        matches = [
+            m
+            for m in matches
+            if m.get("bot_a_id") == focus_bot_id or m.get("bot_b_id") == focus_bot_id
+        ]
     total_scheduled = len(matches)
     if total_scheduled == 0:
         return {"total_matches": 0, "valid_matches": 0}
@@ -149,7 +159,8 @@ def calculate_paired_experiment_metrics(
     matches: list[dict[str, Any]],
     challenger_id: str,
     baseline_id: str,
-    opponent_pool_config: dict[str, Any] | None = None,
+    opponent_pool_config: dict[str, Any] | list[Any] | None = None,
+    resolved_opponents: list[Any] | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Calculate paired baseline-versus-challenger metrics joined by pair_id."""
     overall = calculate_tournament_metrics(matches, focus_bot_id=challenger_id)
@@ -175,19 +186,81 @@ def calculate_paired_experiment_metrics(
         elif m["bot_a_id"] == baseline_id:
             pairs[pair_id]["baseline"] = m
 
+    # Build opponent lookup
+    opp_lookup: dict[str, dict[str, Any]] = {}
+
+    def _register_opp(c_id: str, a_id: str, grp: str, w: float, nm: str):
+        info = {
+            "config_id": c_id,
+            "artifact_id": a_id,
+            "group": grp,
+            "weight": float(w),
+            "name": nm,
+        }
+        if a_id:
+            opp_lookup[a_id] = info
+        if c_id:
+            opp_lookup[c_id] = info
+
+    if resolved_opponents:
+        items = (
+            resolved_opponents.values()
+            if isinstance(resolved_opponents, dict)
+            else resolved_opponents
+        )
+        for ro in items:
+            c_id = getattr(ro, "config_id", None) or (
+                ro.get("config_id") if isinstance(ro, dict) else ""
+            )
+            a_id = getattr(ro, "artifact_id", None) or (
+                ro.get("artifact_id") if isinstance(ro, dict) else ""
+            )
+            grp = getattr(ro, "group", None) or (
+                ro.get("group") if isinstance(ro, dict) else "general"
+            )
+            w = (
+                getattr(ro, "weight", None)
+                if hasattr(ro, "weight")
+                else (ro.get("weight", 1.0) if isinstance(ro, dict) else 1.0)
+            )
+            nm = getattr(ro, "name", None) or (ro.get("name") if isinstance(ro, dict) else c_id)
+            _register_opp(str(c_id), str(a_id), str(grp), float(w or 1.0), str(nm))
+
+    if opponent_pool_config:
+        opp_list = (
+            opponent_pool_config.get("opponents", [])
+            if isinstance(opponent_pool_config, dict)
+            else opponent_pool_config
+        )
+        for opp in opp_list:
+            if hasattr(opp, "config_id"):
+                _register_opp(opp.config_id, opp.artifact_id, opp.group, opp.weight, opp.name)
+            elif isinstance(opp, dict):
+                c_id = opp.get("id") or opp.get("config_id") or ""
+                a_id = opp.get("artifact_id") or c_id
+                grp = opp.get("group", "general")
+                w = float(opp.get("weight", 1.0))
+                nm = opp.get("name", c_id)
+                _register_opp(c_id, a_id, grp, w, nm)
+
     # Compute paired score deltas and win deltas
     score_diffs: list[float] = []
     win_diffs: list[float] = []
+    pair_weights: list[float] = []
     regressions: list[dict[str, Any]] = []
 
-    opp_groups: dict[str, str] = {}
-    opp_weights: dict[str, float] = {}
-    if opponent_pool_config and "opponents" in opponent_pool_config:
-        for opp in opponent_pool_config["opponents"]:
-            opp_groups[opp.get("id", "")] = opp.get("group", "general")
-            opp_weights[opp.get("id", "")] = float(opp.get("weight", 1.0))
+    group_score_deltas: dict[str, list[float]] = {}
+    group_win_deltas: dict[str, list[float]] = {}
+    group_weights: dict[str, list[float]] = {}
 
-    group_deltas: dict[str, list[float]] = {}
+    opp_score_deltas: dict[str, list[float]] = {}
+    opp_win_deltas: dict[str, list[float]] = {}
+
+    map_score_deltas: dict[str, list[float]] = {}
+    map_win_deltas: dict[str, list[float]] = {}
+
+    side_score_deltas: dict[str, list[float]] = {}
+    side_win_deltas: dict[str, list[float]] = {}
 
     for pair_id, pair_data in pairs.items():
         if "challenger" not in pair_data or "baseline" not in pair_data:
@@ -210,22 +283,62 @@ def calculate_paired_experiment_metrics(
 
         win_c = 1.0 if m_c.get("winner") == "A" else (0.5 if m_c.get("outcome") == "DRAW" else 0.0)
         win_b = 1.0 if m_b.get("winner") == "A" else (0.5 if m_b.get("outcome") == "DRAW" else 0.0)
-        win_diffs.append(win_c - win_b)
+        delta_win = win_c - win_b
+        win_diffs.append(delta_win)
 
-        opp_id = m_c.get("bot_b_id", "unknown")
-        grp = opp_groups.get(opp_id, "general")
-        if grp not in group_deltas:
-            group_deltas[grp] = []
-        group_deltas[grp].append(delta_score)
+        opp_raw_id = m_c.get("bot_b_id", "unknown")
+        opp_info = opp_lookup.get(
+            opp_raw_id,
+            {
+                "config_id": opp_raw_id,
+                "artifact_id": opp_raw_id,
+                "group": "general",
+                "weight": 1.0,
+                "name": opp_raw_id,
+            },
+        )
+        opp_config_id = opp_info["config_id"]
+        grp = opp_info["group"]
+        weight = opp_info["weight"]
+        pair_weights.append(weight)
+
+        if grp not in group_score_deltas:
+            group_score_deltas[grp] = []
+            group_win_deltas[grp] = []
+            group_weights[grp] = []
+        group_score_deltas[grp].append(delta_score)
+        group_win_deltas[grp].append(delta_win)
+        group_weights[grp].append(weight)
+
+        if opp_config_id not in opp_score_deltas:
+            opp_score_deltas[opp_config_id] = []
+            opp_win_deltas[opp_config_id] = []
+        opp_score_deltas[opp_config_id].append(delta_score)
+        opp_win_deltas[opp_config_id].append(delta_win)
+
+        map_name = m_c.get("map_name", "unknown")
+        if map_name not in map_score_deltas:
+            map_score_deltas[map_name] = []
+            map_win_deltas[map_name] = []
+        map_score_deltas[map_name].append(delta_score)
+        map_win_deltas[map_name].append(delta_win)
+
+        side_assignment = m_c.get("side_assignment_json", "")
+        side_label = "side_0" if '"A": "side_0"' in side_assignment else "side_1"
+        if side_label not in side_score_deltas:
+            side_score_deltas[side_label] = []
+            side_win_deltas[side_label] = []
+        side_score_deltas[side_label].append(delta_score)
+        side_win_deltas[side_label].append(delta_win)
 
         if score_c < score_b:
             regressions.append(
                 {
                     "pair_id": pair_id,
                     "match_id": pair_id,
-                    "opponent": opp_id,
+                    "opponent": opp_config_id,
                     "opponent_group": grp,
-                    "map": m_c.get("map_name"),
+                    "map": map_name,
                     "seed": m_c.get("seed"),
                     "score_challenger": score_c,
                     "score_baseline": score_b,
@@ -238,18 +351,85 @@ def calculate_paired_experiment_metrics(
     # Sort regressions by deficit descending
     regressions.sort(key=lambda r: r["deficit"], reverse=True)
 
-    mean_score_diff, ci_l, ci_u = paired_bootstrap_difference(score_diffs)
-    mean_win_diff, win_ci_l, win_ci_u = paired_bootstrap_difference(win_diffs)
+    # Calculate unweighted bootstrap
+    unweighted_mean_score_diff, unweighted_score_ci_l, unweighted_score_ci_u = (
+        paired_bootstrap_difference(score_diffs)
+    )
+    unweighted_mean_win_diff, unweighted_win_ci_l, unweighted_win_ci_u = (
+        paired_bootstrap_difference(win_diffs)
+    )
+
+    # Calculate weighted bootstrap
+    weighted_mean_score_diff, weighted_score_ci_l, weighted_score_ci_u = (
+        weighted_paired_bootstrap_difference(score_diffs, pair_weights)
+    )
+    weighted_mean_win_diff, weighted_win_ci_l, weighted_win_ci_u = (
+        weighted_paired_bootstrap_difference(win_diffs, pair_weights)
+    )
 
     # Breakdown by opponent group
     by_opponent_group: dict[str, dict[str, Any]] = {}
-    for grp, deltas in group_deltas.items():
-        m_diff, cl, cu = paired_bootstrap_difference(deltas)
+    for grp, s_deltas in group_score_deltas.items():
+        w_deltas = group_win_deltas[grp]
+        m_score, s_cl, s_cu = paired_bootstrap_difference(s_deltas)
+        m_win, w_cl, w_cu = paired_bootstrap_difference(w_deltas)
         by_opponent_group[grp] = {
-            "pair_count": len(deltas),
-            "mean_score_diff": round(m_diff, 4),
-            "ci_95": [round(cl, 4), round(cu, 4)],
+            "pair_count": len(s_deltas),
+            "mean_score_diff": round(m_score, 4),
+            "score_ci_95": [round(s_cl, 4), round(s_cu, 4)],
+            "ci_95": [round(s_cl, 4), round(s_cu, 4)],
+            "mean_win_diff": round(m_win, 4),
+            "win_ci_95": [round(w_cl, 4), round(w_cu, 4)],
         }
+
+    # Breakdown by opponent
+    by_opponent: dict[str, dict[str, Any]] = {}
+    for op, s_deltas in opp_score_deltas.items():
+        w_deltas = opp_win_deltas[op]
+        m_score, s_cl, s_cu = paired_bootstrap_difference(s_deltas)
+        m_win, w_cl, w_cu = paired_bootstrap_difference(w_deltas)
+        by_opponent[op] = {
+            "pair_count": len(s_deltas),
+            "mean_score_diff": round(m_score, 4),
+            "score_ci_95": [round(s_cl, 4), round(s_cu, 4)],
+            "mean_win_diff": round(m_win, 4),
+            "win_ci_95": [round(w_cl, 4), round(w_cu, 4)],
+        }
+
+    # Breakdown by map
+    by_map_paired: dict[str, dict[str, Any]] = {}
+    for mp, s_deltas in map_score_deltas.items():
+        w_deltas = map_win_deltas[mp]
+        m_score, _, _ = paired_bootstrap_difference(s_deltas)
+        m_win, _, _ = paired_bootstrap_difference(w_deltas)
+        by_map_paired[mp] = {
+            "pair_count": len(s_deltas),
+            "mean_score_diff": round(m_score, 4),
+            "mean_win_diff": round(m_win, 4),
+        }
+
+    # Breakdown by side
+    by_side_paired: dict[str, dict[str, Any]] = {}
+    for sd, s_deltas in side_score_deltas.items():
+        w_deltas = side_win_deltas[sd]
+        m_score, _, _ = paired_bootstrap_difference(s_deltas)
+        m_win, _, _ = paired_bootstrap_difference(w_deltas)
+        by_side_paired[sd] = {
+            "pair_count": len(s_deltas),
+            "mean_score_diff": round(m_score, 4),
+            "mean_win_diff": round(m_win, 4),
+        }
+
+    # Runtime headroom
+    per_turn_limit = 5000.0
+    for m in matches:
+        if limit := (m.get("per_turn_limit_ms") or m.get("time_limit_ms")):
+            per_turn_limit = float(limit)
+            break
+    p99_dur = overall.get("runtime_percentiles_ms", {}).get("p99", 0.0)
+    headroom = 1.0 - (p99_dur / per_turn_limit) if per_turn_limit > 0 else 1.0
+    overall["runtime_headroom"] = round(max(0.0, min(1.0, headroom)), 4)
+    overall["per_turn_limit_ms"] = per_turn_limit
 
     # Direct head-to-head metrics if present
     direct_metrics = (
@@ -262,12 +442,44 @@ def calculate_paired_experiment_metrics(
         "aggregate": overall,
         "paired_analysis": {
             "completed_pairs": len(score_diffs),
-            "mean_score_delta": round(mean_score_diff, 4),
-            "score_delta_bootstrap_ci_95": [round(ci_l, 4), round(ci_u, 4)],
-            "paired_bootstrap_ci_95": [round(ci_l, 4), round(ci_u, 4)],
-            "mean_win_rate_delta": round(mean_win_diff, 4),
-            "win_delta_bootstrap_ci_95": [round(win_ci_l, 4), round(win_ci_u, 4)],
+            "mean_score_delta": round(weighted_mean_score_diff, 4),
+            "score_delta_bootstrap_ci_95": [
+                round(weighted_score_ci_l, 4),
+                round(weighted_score_ci_u, 4),
+            ],
+            "paired_bootstrap_ci_95": [
+                round(weighted_score_ci_l, 4),
+                round(weighted_score_ci_u, 4),
+            ],
+            "mean_win_rate_delta": round(weighted_mean_win_diff, 4),
+            "win_delta_bootstrap_ci_95": [
+                round(weighted_win_ci_l, 4),
+                round(weighted_win_ci_u, 4),
+            ],
+            "weighted_mean_score_delta": round(weighted_mean_score_diff, 4),
+            "weighted_score_delta_ci_95": [
+                round(weighted_score_ci_l, 4),
+                round(weighted_score_ci_u, 4),
+            ],
+            "weighted_mean_win_delta": round(weighted_mean_win_diff, 4),
+            "weighted_win_delta_ci_95": [
+                round(weighted_win_ci_l, 4),
+                round(weighted_win_ci_u, 4),
+            ],
+            "unweighted_mean_score_delta": round(unweighted_mean_score_diff, 4),
+            "unweighted_score_delta_ci_95": [
+                round(unweighted_score_ci_l, 4),
+                round(unweighted_score_ci_u, 4),
+            ],
+            "unweighted_mean_win_delta": round(unweighted_mean_win_diff, 4),
+            "unweighted_win_delta_ci_95": [
+                round(unweighted_win_ci_l, 4),
+                round(unweighted_win_ci_u, 4),
+            ],
+            "by_opponent": by_opponent,
             "by_opponent_group": by_opponent_group,
+            "by_map": by_map_paired,
+            "by_side": by_side_paired,
             "worst_regressions": regressions[:5],
         },
         "direct_head_to_head": direct_metrics,

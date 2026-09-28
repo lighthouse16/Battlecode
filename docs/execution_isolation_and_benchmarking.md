@@ -50,7 +50,9 @@ PENDING -> RUNNING -> COMPLETED
 ```
 
 ### Atomic Lease Protocol
-- Workers lease matches using SQLite compare-and-swap (CAS) queries.
+- Workers lease matches using SQLite compare-and-swap (CAS) queries with unique `lease_token` values.
+- Workers actively renew their leases via heartbeat threads during long-running execution.
+- Stale workers that finish after lease expiration are unconditionally rejected by the fencing token.
 - Only matches with status `PENDING`, `RETRYABLE_FAILURE`, or expired `RUNNING` leases (`lease_expires_at < now`) can be claimed.
 - Multi-scheduler concurrency testing guarantees exactly-once match execution.
 
@@ -60,6 +62,7 @@ PENDING -> RUNNING -> COMPLETED
 
 Evaluation matrices are configured via `configs/opponent_pool.yaml` and evaluated with paired comparisons:
 - **Pairing**: Every challenger-versus-opponent match is joined with an equivalent baseline-versus-opponent match under identical maps, seeds, and side assignments via a stable `pair_id`.
+- **Opponent Weighting**: Opponents have configurable weights; bootstrap resampling samples pairs according to opponent weights.
 - **Wilson Score Intervals**: 95% confidence intervals are computed for discrete win rates:
   $$\tilde{p} = \frac{n_w + \frac{z^2}{2}}{n + z^2}$$
 - **Paired Bootstrap Differences**: 1,000 resamples calculate the 95% confidence interval for score and win-rate deltas ($\Delta = \text{Challenger} - \text{Baseline}$).
@@ -71,18 +74,19 @@ Evaluation matrices are configured via `configs/opponent_pool.yaml` and evaluate
 
 ### Promotion Gates
 To be promoted to champion status, a challenger must pass all criteria in `configs/promotion.yaml`:
-1. Artifact integrity verified (SHA-256 match).
+1. Artifact integrity verified (SHA-256 match, no extra or modified files).
 2. Multi-seed determinism check verified against normalized frames (excluding volatile timings).
-3. Win rate $\ge 50\%$ with lower bound of 95% Wilson CI $\ge 45\%$.
-4. Zero crashes, zero unhandled timeouts, zero invalid actions.
-5. Max segment regression within tolerance (e.g. $\le 25\%$ win rate deficit on any single map).
+3. Win rate $\ge 50\%$ with positive lower bound of 95% paired bootstrap CI ($> 0.0$).
+4. Minimum runtime headroom $\ge 10\%$ relative to per-turn timeout.
+5. Zero crashes, zero unhandled timeouts, zero invalid actions.
+6. Max opponent group, map, and side segment regressions within strict tolerances.
 
 ### Human Override Audit
 To prevent accidental regressions while maintaining human control:
 - The `--force` flag is removed.
 - Overrides require:
   - `--actor <name>` (human identity)
-  - `--override-reason <text>` (mandatory justification)
+  - `--override-reason <text>` (mandatory justification, $\ge 15$ characters)
   - `--acknowledge-risk I_ACKNOWLEDGE_STATISTICAL_RISK` (explicit confirmation)
 - Overrides are permanently recorded in the `promotions` table as `MANUAL_OVERRIDE`.
 

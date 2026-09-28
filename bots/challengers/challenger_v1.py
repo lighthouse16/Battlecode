@@ -1,11 +1,14 @@
-"""Executable Challenger v1 Bot (Greedy with Corner Navigation).
+"""Executable Challenger v1 Bot (Safe Greedy Harvester).
 
 Protocol: Reads JSON state per turn from stdin, writes JSON action to stdout.
 """
-import sys
-import json
+from __future__ import annotations
 
-def main():
+import json
+import sys
+
+
+def main() -> None:
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -19,54 +22,61 @@ def main():
             break
 
         my_pos = state.get("your_pos", [0, 0])
+        px, py = int(my_pos[0]), int(my_pos[1])
         claimed = state.get("claimed_tiles", [])
-        claimed_set = {(t["x"], t["y"]) for t in claimed}
-        already_claimed = (my_pos[0], my_pos[1]) in claimed_set
+        claimed_set = {(int(t["x"]), int(t["y"])) for t in claimed if "x" in t and "y" in t}
 
-        if not already_claimed:
+        w = int(state.get("map", {}).get("width", 8))
+        h = int(state.get("map", {}).get("height", 8))
+
+        if (px, py) not in claimed_set:
             action = {"type": "CLAIM"}
         else:
-            w = state.get("map", {}).get("width", 8)
-            h = state.get("map", {}).get("height", 8)
-            dirs = [
-                ("RIGHT", (my_pos[0] + 1, my_pos[1])),
-                ("DOWN", (my_pos[0], my_pos[1] + 1)),
-                ("LEFT", (my_pos[0] - 1, my_pos[1])),
-                ("UP", (my_pos[0], my_pos[1] - 1)),
+            unclaimed = [
+                (x, y)
+                for x in range(w)
+                for y in range(h)
+                if (x, y) not in claimed_set
             ]
-            chosen_dir = None
-            for d_name, (nx, ny) in dirs:
-                if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in claimed_set:
-                    chosen_dir = d_name
-                    break
+            if not unclaimed:
+                action = {"type": "PASS"}
+            else:
+                tx, ty = min(
+                    unclaimed,
+                    key=lambda p: abs(p[0] - px) + abs(p[1] - py),
+                )
+                candidates: list[tuple[str, int]] = []
+                if tx > px and px + 1 < w:
+                    candidates.append(("RIGHT", abs(tx - (px + 1)) + abs(ty - py)))
+                if tx < px and px - 1 >= 0:
+                    candidates.append(("LEFT", abs(tx - (px - 1)) + abs(ty - py)))
+                if ty > py and py + 1 < h:
+                    candidates.append(("DOWN", abs(tx - px) + abs(ty - (py + 1))))
+                if ty < py and py - 1 >= 0:
+                    candidates.append(("UP", abs(tx - px) + abs(ty - (py - 1))))
 
-            if not chosen_dir:
-                unclaimed_tiles = [
-                    (x, y)
-                    for x in range(w)
-                    for y in range(h)
-                    if (x, y) not in claimed_set
-                ]
-                if unclaimed_tiles:
-                    tx, ty = min(
-                        unclaimed_tiles,
-                        key=lambda p: abs(p[0] - my_pos[0]) + abs(p[1] - my_pos[1]),
-                    )
-                    if tx > my_pos[0]:
-                        chosen_dir = "RIGHT"
-                    elif tx < my_pos[0]:
-                        chosen_dir = "LEFT"
-                    elif ty > my_pos[1]:
-                        chosen_dir = "DOWN"
-                    else:
-                        chosen_dir = "UP"
+                if candidates:
+                    candidates.sort(key=lambda c: c[1])
+                    action = {"type": "MOVE", "direction": candidates[0][0]}
                 else:
-                    chosen_dir = "RIGHT" if my_pos[0] + 1 < w else "LEFT"
-
-            action = {"type": "MOVE", "direction": chosen_dir}
+                    fallbacks: list[str] = []
+                    if px + 1 < w:
+                        fallbacks.append("RIGHT")
+                    if py + 1 < h:
+                        fallbacks.append("DOWN")
+                    if px - 1 >= 0:
+                        fallbacks.append("LEFT")
+                    if py - 1 >= 0:
+                        fallbacks.append("UP")
+                    if fallbacks:
+                        action = {"type": "MOVE", "direction": fallbacks[0]}
+                    else:
+                        action = {"type": "PASS"}
 
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()
 
+
 if __name__ == "__main__":
     main()
+

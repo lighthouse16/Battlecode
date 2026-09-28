@@ -57,13 +57,25 @@ def test_experiment_eval_and_promotion(tmp_path: Path):
     criteria_res = gate.check_criteria(loaded_exp, loaded_exp.results_summary)
     assert "metrics_evaluated" in criteria_res
 
-    # Test Dry Run
-    dry = gate.promote(exp.experiment_id, dry_run=True, force=True)
+    # Test Dry Run with manual override
+    dry = gate.promote(
+        exp.experiment_id,
+        dry_run=True,
+        actor="engineer_alice",
+        override_reason="Integration test manual override qualification",
+        acknowledge_risk="I_ACKNOWLEDGE_STATISTICAL_RISK",
+    )
     assert dry["dry_run"] is True
     assert dry["would_promote"] == challenger.artifact_id
 
     # Test Actual Promotion
-    prom_res = gate.promote(exp.experiment_id, dry_run=False, force=True)
+    prom_res = gate.promote(
+        exp.experiment_id,
+        dry_run=False,
+        actor="engineer_alice",
+        override_reason="Integration test manual override qualification",
+        acknowledge_risk="I_ACKNOWLEDGE_STATISTICAL_RISK",
+    )
     assert prom_res["status"] == "PROMOTED"
 
     # Verify champion manifest
@@ -109,7 +121,7 @@ def test_promotion_rejection_on_failure(tmp_path: Path):
 
     gate = PromotionGate(db)
     with pytest.raises(PromotionGateError) as exc_info:
-        gate.promote(exp.experiment_id, dry_run=False, force=False)
+        gate.promote(exp.experiment_id, dry_run=False)
 
     assert len(exc_info.value.violations) > 0
     # Confirm champion did NOT become the buggy challenger

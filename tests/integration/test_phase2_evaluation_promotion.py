@@ -80,7 +80,7 @@ def test_multi_seed_determinism_check(tmp_path: Path):
     )
     ok_nondet, err_nondet = gate._verify_multi_seed_determinism(nondet_bot.artifact_id)
     assert ok_nondet is False
-    assert "Discrepancy" in err_nondet or "discrepancy" in err_nondet.lower()
+    assert "discrepancy" in err_nondet.lower() or "divergence" in err_nondet.lower()
 
 
 def test_hardened_promotion_gates_and_override_audit(tmp_path: Path):
@@ -114,7 +114,7 @@ def test_hardened_promotion_gates_and_override_audit(tmp_path: Path):
 
     # 1. Standard promotion fails
     with pytest.raises(PromotionGateError) as exc_info:
-        gate.promote(exp.experiment_id, dry_run=False, force=False)
+        gate.promote(exp.experiment_id, dry_run=False)
     assert len(exc_info.value.violations) > 0
 
     # 2. Override fails without full explicit acknowledgement and reason

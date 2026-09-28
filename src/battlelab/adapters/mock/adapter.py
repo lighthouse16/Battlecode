@@ -90,49 +90,55 @@ class MockAdapter(GameAdapter):
         return "fixed"
 
     def _locate_artifact_entrypoint(self, bot: BotArtifact) -> Path:
-        """Find executable entrypoint strictly inside the immutable snapshot directory."""
+        """Find executable entrypoint strictly via bot.entrypoint_relpath or manifest."""
         snapshot_loc = Path(bot.source_location)
         if snapshot_loc.is_file():
             return snapshot_loc
 
-        # Directory search: check main.py, bot.py, entrypoint.py, or any .py
-        for candidate in ["main.py", "bot.py", "entrypoint.py"]:
-            p = snapshot_loc / candidate
+        # 1. Explicit entrypoint_relpath on bot artifact
+        if getattr(bot, "entrypoint_relpath", None):
+            p = snapshot_loc / bot.entrypoint_relpath
             if p.is_file():
                 return p
 
-        if snapshot_loc.is_dir():
-            py_files = sorted(list(snapshot_loc.glob("*.py")))
-            if py_files:
-                return py_files[0]
+        # 2. Check manifest.json inside snapshot directory
+        manifest_file = snapshot_loc / "manifest.json"
+        if manifest_file.is_file():
+            try:
+                with open(manifest_file, "r", encoding="utf-8") as f:
+                    mdata = json.load(f)
+                rel = mdata.get("entrypoint_relpath")
+                if rel and (snapshot_loc / rel).is_file():
+                    return snapshot_loc / rel
+            except Exception:
+                pass
 
-        # Fallback for synthetic bot artifacts (unit tests with non-existent paths)
-        tag_map = {
-            "policy:random": Path("bots/baselines/random_bot.py"),
-            "policy:fixed": Path("bots/baselines/fixed_bot.py"),
-            "policy:resource": Path("bots/baselines/resource_bot.py"),
-            "policy:aggressive": Path("bots/baselines/aggressive_bot.py"),
-            "policy:defensive": Path("bots/baselines/defensive_bot.py"),
-            "fail:crash": Path("bots/adversaries/crash_bot.py"),
-            "fail:timeout": Path("bots/adversaries/timeout_bot.py"),
-            "fail:invalid_action": Path("bots/adversaries/malformed_bot.py"),
-            "fail:nondeterministic": Path("bots/adversaries/nondeterministic_bot.py"),
-        }
-        for tag in bot.tags:
-            if tag in tag_map and tag_map[tag].is_file():
-                return tag_map[tag]
+        # 3. Controlled synthetic fixture fallback strictly when snapshot directory is empty or non-existent
+        if not snapshot_loc.exists() or (snapshot_loc.is_dir() and not any(snapshot_loc.iterdir())):
+            tag_map = {
+                "policy:random": Path("bots/baselines/random_bot.py"),
+                "policy:fixed": Path("bots/baselines/fixed_bot.py"),
+                "policy:resource": Path("bots/baselines/resource_bot.py"),
+                "policy:aggressive": Path("bots/baselines/aggressive_bot.py"),
+                "policy:defensive": Path("bots/baselines/defensive_bot.py"),
+                "fail:crash": Path("bots/adversaries/crash_bot.py"),
+                "fail:timeout": Path("bots/adversaries/timeout_bot.py"),
+                "fail:invalid_action": Path("bots/adversaries/malformed_bot.py"),
+                "fail:nondeterministic": Path("bots/adversaries/nondeterministic_bot.py"),
+            }
+            for tag in bot.tags:
+                if tag in tag_map and tag_map[tag].is_file():
+                    return tag_map[tag]
 
-        for cand in [
-            Path("bots/baselines") / f"{bot.display_name.lower()}_bot.py",
-            Path("bots/baselines") / f"{bot.display_name.lower().replace('bot', '')}_bot.py",
-            Path("bots/baselines/fixed_bot.py"),
-            Path("src/battlelab/adapters/mock/bots.py"),
-        ]:
-            if cand.is_file():
-                return cand
+            for cand in [
+                Path("bots/baselines/fixed_bot.py"),
+                Path("src/battlelab/adapters/mock/bots.py"),
+            ]:
+                if cand.is_file():
+                    return cand
 
         raise FileNotFoundError(
-            f"No executable python entrypoint found in snapshot: {snapshot_loc}"
+            f"No recorded executable entrypoint found in snapshot: {snapshot_loc}"
         )
 
     def run_local_match(
@@ -163,11 +169,21 @@ class MockAdapter(GameAdapter):
         entry_a = self._locate_artifact_entrypoint(bot_a)
         entry_b = self._locate_artifact_entrypoint(bot_b)
 
-        # Prepare subprocess instances
+        # Prepare subprocess instances with memory limit
         env_a = {"BATTLELAB_BOT_POLICY": self._policy_for_bot(bot_a)}
         env_b = {"BATTLELAB_BOT_POLICY": self._policy_for_bot(bot_b)}
-        proc_a = BotSubprocess(entrypoint_path=entry_a, cwd=entry_a.parent, env=env_a)
-        proc_b = BotSubprocess(entrypoint_path=entry_b, cwd=entry_b.parent, env=env_b)
+        proc_a = BotSubprocess(
+            entrypoint_path=entry_a,
+            cwd=entry_a.parent,
+            env=env_a,
+            memory_limit_mb=spec.memory_limit_mb,
+        )
+        proc_b = BotSubprocess(
+            entrypoint_path=entry_b,
+            cwd=entry_b.parent,
+            env=env_b,
+            memory_limit_mb=spec.memory_limit_mb,
+        )
 
         # Side assignment
         side_a = spec.side_assignment.get("A", "side_0")
@@ -178,11 +194,12 @@ class MockAdapter(GameAdapter):
             proc_0, proc_1 = proc_b, proc_a
             bot_0_is_a = False
 
-        # Run engine with real subprocesses
+        # Run engine with real subprocesses and explicit limits
         engine_res = engine.run_match_subprocesses(
             bot_proc_0=proc_0,
             bot_proc_1=proc_1,
-            per_turn_limit_ms=spec.time_limit_ms,
+            per_turn_limit_ms=spec.per_turn_limit_ms,
+            match_wall_clock_limit_ms=spec.match_wall_clock_limit_ms,
         )
 
         # Map back to Bot A and Bot B
@@ -318,8 +335,8 @@ class MockAdapter(GameAdapter):
             score_b=score_b,
             duration_ms=engine_res.duration_ms,
             turns_played=engine_res.turns_played,
-            bot_a_stats={"score": score_a},
-            bot_b_stats={"score": score_b},
+            bot_a_stats={"score": score_a, **proc_a.get_runtime_statistics(spec.per_turn_limit_ms)},
+            bot_b_stats={"score": score_b, **proc_b.get_runtime_statistics(spec.per_turn_limit_ms)},
             crashed_a=crashed_a,
             crashed_b=crashed_b,
             timed_out_a=timed_out_a,

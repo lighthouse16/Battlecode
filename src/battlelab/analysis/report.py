@@ -40,9 +40,12 @@ def generate_experiment_report(
         f"- **Representative Replays**: {', '.join(f'`{r}`' for r in exp.representative_replays) if exp.representative_replays else 'None'}",
         "",
         "## 3. Aggregate Performance",
-        f"- **Total Matches**: {agg.get('total_matches', 0)}",
+        f"- **Total Scheduled**: {agg.get('total_scheduled', agg.get('total_matches', 0))}",
+        f"- **Valid Matches**: {agg.get('valid_matches', 0)}",
         f"- **Record (W / D / L)**: {agg.get('wins', 0)} / {agg.get('draws', 0)} / {agg.get('losses', 0)}",
-        f"- **Mean Score Difference**: {paired.get('mean_score_diff', 0.0):+.2f}",
+        f"- **Mean Score Difference**: {paired.get('mean_score_delta', paired.get('mean_score_diff', 0.0)):+.2f}",
+        f"- **Paired Win Rate Delta**: {paired.get('mean_win_rate_delta', 0.0):+.2%}",
+        f"- **Weighted Win Delta**: {paired.get('weighted_mean_win_delta', 0.0):+.2%}",
         f"- **Paired Bootstrap CI (95%)**: {paired.get('paired_bootstrap_ci_95', [0.0, 0.0])}",
         "",
         "## 4. Reliability & Runtime",
@@ -50,6 +53,7 @@ def generate_experiment_report(
         f"- **Timeouts**: {agg.get('timeout_count', 0)} (Rate: {agg.get('timeout_rate', 0.0) * 100:.1f}%)",
         f"- **Invalid Actions**: {agg.get('invalid_action_count', 0)}",
         f"- **Missing Replays**: {agg.get('missing_replays', 0)}",
+        f"- **Runtime Headroom**: {agg.get('runtime_headroom', 1.0):.1%}",
         f"- **Runtime Percentiles (ms)**: p50={agg.get('runtime_percentiles_ms', {}).get('p50', 0)}, "
         f"p90={agg.get('runtime_percentiles_ms', {}).get('p90', 0)}, "
         f"p99={agg.get('runtime_percentiles_ms', {}).get('p99', 0)}",
@@ -59,8 +63,22 @@ def generate_experiment_report(
     ]
 
     for map_name, stats in agg.get("by_map", {}).items():
+        total_m = stats.get("valid_total", stats.get("total", 0))
         lines.append(
-            f"- **{map_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L ({stats.get('total', 0)} matches)"
+            f"- **{map_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L ({total_m} matches)"
+        )
+
+    lines.extend(
+        [
+            "",
+            "### By Opponent Group",
+        ]
+    )
+    for grp_name, grp_stats in paired.get("by_opponent_group", {}).items():
+        lines.append(
+            f"- **{grp_name}**: {grp_stats.get('pair_count', 0)} pairs, "
+            f"score_delta={grp_stats.get('mean_score_diff', 0.0):+.2f}, "
+            f"win_delta={grp_stats.get('mean_win_diff', 0.0):+.2%}"
         )
 
     lines.extend(

@@ -11,6 +11,7 @@ from battlelab.adapters import get_adapter
 from battlelab.bots.artifacts import create_bot_artifact
 from battlelab.bots.process_runner import (
     check_memory_limit_support,
+    is_process_active,
     terminate_process_tree,
 )
 from battlelab.core.models import FailureCategory, MatchOutcome, MatchSpec
@@ -118,8 +119,8 @@ while True:
     terminate_process_tree(proc, timeout_seconds=1.0)
     time.sleep(0.1)
 
-    assert not psutil.pid_exists(proc.pid)
-    assert not psutil.pid_exists(child_pid)
+    assert not is_process_active(proc.pid)
+    assert not is_process_active(child_pid)
 
 
 def test_memory_limit_support_check():

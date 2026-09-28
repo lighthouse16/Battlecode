@@ -12,7 +12,6 @@ from battlelab.adapters import get_adapter
 from battlelab.bots.registry import BotRegistry
 from battlelab.config.loader import load_yaml_config
 from battlelab.core.errors import PromotionGateError
-from battlelab.core.hashing import hash_directory, hash_file
 from battlelab.core.models import Experiment, MatchSpec
 from battlelab.storage.database import Database
 from battlelab.storage.paths import get_data_dir
@@ -42,8 +41,14 @@ class PromotionGate:
         max_crash = cfg.get("max_crash_rate", 0.0)
         max_timeout = cfg.get("max_timeout_rate", 0.0)
         max_invalid = cfg.get("max_invalid_action_rate", 0.0)
-        require_pos_lower_ci = cfg.get("require_positive_lower_ci", False)
+        require_pos_lower_ci = cfg.get("require_positive_lower_ci", True)
         min_paired_delta = cfg.get("min_paired_mean_delta", 0.0)
+        min_weighted_win_delta = cfg.get("min_weighted_win_delta", 0.0)
+        min_paired_win_delta_lower_bound = cfg.get("min_paired_win_delta_lower_bound", 0.0)
+        min_runtime_headroom = cfg.get("min_runtime_headroom", 0.10)
+        max_group_regression_delta = cfg.get("max_group_regression_delta", -0.15)
+        max_map_regression_delta = cfg.get("max_map_regression_delta", -0.20)
+        max_side_regression_delta = cfg.get("max_side_regression_delta", -0.25)
         check_det = cfg.get("require_determinism_pass", True)
 
         agg = metrics.get("aggregate", {})
@@ -54,10 +59,15 @@ class PromotionGate:
         crash_rate = agg.get("crash_rate", 0.0)
         timeout_rate = agg.get("timeout_rate", 0.0)
         invalid_rate = agg.get("invalid_action_rate", 0.0)
+        headroom = agg.get("runtime_headroom", 1.0)
 
         paired = metrics.get("paired_analysis", {})
         mean_score_delta = paired.get("mean_score_delta", 0.0)
-        ci_lower = paired.get("score_delta_bootstrap_ci_95", [-1.0, 1.0])[0]
+        weighted_win_delta = paired.get(
+            "weighted_mean_win_delta", paired.get("mean_win_rate_delta", 0.0)
+        )
+        score_ci_lower = paired.get("score_delta_bootstrap_ci_95", [-1.0, 1.0])[0]
+        win_ci_lower = paired.get("win_delta_bootstrap_ci_95", [-1.0, 1.0])[0]
 
         violations: list[str] = []
 
@@ -83,13 +93,29 @@ class PromotionGate:
                 f"Mean score delta {mean_score_delta:+.2f} is below minimum threshold of {min_paired_delta:+.2f}."
             )
 
-        # 5. Statistical confidence bound
-        if require_pos_lower_ci and ci_lower <= 0.0:
+        if weighted_win_delta < min_weighted_win_delta:
             violations.append(
-                f"Paired delta 95% CI lower bound {ci_lower:+.2f} must be positive (> 0.0) for promotion."
+                f"Weighted win delta {weighted_win_delta:+.2%} is below minimum threshold of {min_weighted_win_delta:+.2%}."
             )
 
-        # 6. Reliability constraints
+        # 5. Statistical confidence bound
+        if require_pos_lower_ci:
+            if win_ci_lower <= min_paired_win_delta_lower_bound:
+                violations.append(
+                    f"Paired win delta 95% CI lower bound {win_ci_lower:+.4f} must be positive (> {min_paired_win_delta_lower_bound}) for promotion."
+                )
+            if score_ci_lower <= 0.0:
+                violations.append(
+                    f"Paired score delta 95% CI lower bound {score_ci_lower:+.2f} must be positive (> 0.0) for promotion."
+                )
+
+        # 6. Runtime headroom
+        if headroom < min_runtime_headroom:
+            violations.append(
+                f"Runtime headroom {headroom:.1%} is below minimum requirement of {min_runtime_headroom:.1%}."
+            )
+
+        # 7. Reliability constraints
         if crash_rate > max_crash:
             violations.append(
                 f"Crash rate {crash_rate:.2%} exceeds maximum allowable {max_crash:.2%}."
@@ -105,19 +131,34 @@ class PromotionGate:
                 f"Invalid action rate {invalid_rate:.2%} exceeds maximum allowable {max_invalid:.2%}."
             )
 
-        # 7. Segment regressions check
-        max_tol = cfg.get("max_map_regression_tolerance", 0.25)
-        by_map = agg.get("by_map", {})
-        for map_name, map_stats in by_map.items():
-            tot = map_stats.get("valid_total", 0)
-            if tot >= cfg.get("min_segment_sample_size", 1):
-                m_wr = map_stats.get("win_rate", 0.0)
-                if m_wr < (min_win_rate - max_tol):
-                    violations.append(
-                        f"Map '{map_name}' win rate {m_wr:.2%} regressed beyond tolerance ({min_win_rate - max_tol:.2%})."
-                    )
+        # 8. Opponent group regressions
+        by_grp = paired.get("by_opponent_group", {})
+        for grp_name, grp_stats in by_grp.items():
+            grp_win_d = grp_stats.get("mean_win_diff", 0.0)
+            if grp_win_d < max_group_regression_delta:
+                violations.append(
+                    f"Opponent group '{grp_name}' paired win delta {grp_win_d:+.2%} regressed beyond tolerance ({max_group_regression_delta:+.2%})."
+                )
 
-        # 8. Multi-seed determinism check
+        # 9. Map regressions
+        by_map = paired.get("by_map", {})
+        for map_name, map_stats in by_map.items():
+            m_win_d = map_stats.get("mean_win_diff", 0.0)
+            if m_win_d < max_map_regression_delta:
+                violations.append(
+                    f"Map '{map_name}' paired win delta {m_win_d:+.2%} regressed beyond tolerance ({max_map_regression_delta:+.2%})."
+                )
+
+        # 10. Side regressions
+        by_side = paired.get("by_side", {})
+        for side_name, side_stats in by_side.items():
+            s_win_d = side_stats.get("mean_win_diff", 0.0)
+            if s_win_d < max_side_regression_delta:
+                violations.append(
+                    f"Side '{side_name}' paired win delta {s_win_d:+.2%} regressed beyond tolerance ({max_side_regression_delta:+.2%})."
+                )
+
+        # 11. Multi-seed determinism check
         if check_det:
             det_ok, det_err = self._verify_multi_seed_determinism(exp.challenger_artifact_id)
             if not det_ok:
@@ -134,7 +175,10 @@ class PromotionGate:
                 "infra_failures": infra_failures,
                 "win_rate": win_rate,
                 "mean_score_delta": mean_score_delta,
-                "paired_ci_lower": ci_lower,
+                "weighted_win_delta": weighted_win_delta,
+                "paired_ci_lower": score_ci_lower,
+                "win_ci_lower": win_ci_lower,
+                "runtime_headroom": headroom,
                 "crash_rate": crash_rate,
                 "timeout_rate": timeout_rate,
                 "invalid_action_rate": invalid_rate,
@@ -191,7 +235,7 @@ class PromotionGate:
                             if f1 != f2:
                                 return (
                                     False,
-                                    f"Divergence on seed {seed} at frame {idx}: {f1} != {f2}",
+                                    f"Frame divergence discrepancy on seed {seed} at frame {idx}: {f1} != {f2}",
                                 )
 
             return True, "Multi-seed determinism verified"
@@ -228,39 +272,21 @@ class PromotionGate:
 
     def _verify_artifact_integrity(self, artifact_id: str) -> tuple[bool, str]:
         """Verify that files in the immutable snapshot have not been tampered with."""
-        bot = self.registry.get_artifact(artifact_id)
-        snapshot_path = Path(bot.source_location)
-        if not snapshot_path.exists():
-            return False, f"Artifact snapshot path missing: {snapshot_path}"
-        if snapshot_path.is_dir():
-            dir_hash = hash_directory(snapshot_path)
-            if dir_hash == bot.source_hash:
-                return True, "Integrity verified"
-            # Support single-file registrations staged inside snapshot directory
-            for f in snapshot_path.iterdir():
-                if f.is_file() and not f.name.endswith((".pyc", ".pyo")):
-                    if hash_file(f) == bot.source_hash:
-                        return True, "Integrity verified"
-            return (
-                False,
-                f"Artifact hash mismatch! Stored {bot.source_hash[:12]} != Current {dir_hash[:12]}",
-            )
-        current_hash = hash_file(snapshot_path)
-        if current_hash != bot.source_hash:
-            return (
-                False,
-                f"Artifact hash mismatch! Stored {bot.source_hash[:12]} != Current {current_hash[:12]}",
-            )
-        return True, "Integrity verified"
+        from battlelab.bots.artifacts import verify_artifact_integrity
+
+        try:
+            bot = self.registry.get_artifact(artifact_id)
+            return verify_artifact_integrity(bot)
+        except Exception as e:
+            return False, str(e)
 
     def promote(
         self,
         experiment_id: str,
         dry_run: bool = False,
-        actor: str = "human",
+        actor: str = "",
         override_reason: str | None = None,
         acknowledge_risk: str | None = None,
-        force: bool = False,
     ) -> dict[str, Any]:
         """Promote experiment challenger to champion status with strict safety gates."""
         exp = self.db.get_experiment(experiment_id)
@@ -287,28 +313,28 @@ class PromotionGate:
         is_override = False
 
         if not check_res["passed"]:
-            # Check for deliberate human override or legacy force
-            if force:
-                is_override = True
-                override_reason = override_reason or "Legacy force override"
-                acknowledge_risk = REQUIRED_OVERRIDE_ACKNOWLEDGEMENT
-                actor = actor or "legacy_caller"
-            elif (
-                acknowledge_risk == REQUIRED_OVERRIDE_ACKNOWLEDGEMENT
-                and override_reason
-                and override_reason.strip()
-                and actor
-                and actor.strip()
-            ):
+            actor_clean = (actor or "").strip().lower()
+            disallowed_actors = {"human", "unknown", "system", "admin", "root", ""}
+            banned_substrings = ["bot", "agent", "ai", "copilot", "auto", "model"]
+            is_actor_valid = (
+                bool(actor_clean)
+                and actor_clean not in disallowed_actors
+                and not any(b in actor_clean for b in banned_substrings)
+            )
+            is_reason_valid = bool(override_reason and len(override_reason.strip()) >= 15)
+            is_ack_valid = acknowledge_risk == REQUIRED_OVERRIDE_ACKNOWLEDGEMENT
+
+            if is_actor_valid and is_reason_valid and is_ack_valid:
                 is_override = True
             else:
                 exp.promotion_decision = "REJECTED"
                 exp.rejection_reason = "; ".join(check_res["violations"])
                 self.db.save_experiment(exp)
                 raise PromotionGateError(
-                    f"Candidate artifact {exp.challenger_artifact_id} failed promotion gates. "
-                    "To override, human actor identity, mandatory reason, and explicit acknowledgement "
-                    f"(--acknowledge-risk {REQUIRED_OVERRIDE_ACKNOWLEDGEMENT}) are required.",
+                    f"Candidate artifact {exp.challenger_artifact_id} failed promotion gates: "
+                    f"{'; '.join(check_res['violations'])}. "
+                    "To override, an identifiable individual human actor, reason (>= 15 chars), "
+                    f"and explicit acknowledgement (--acknowledge-risk {REQUIRED_OVERRIDE_ACKNOWLEDGEMENT}) are required.",
                     violations=check_res["violations"],
                 )
 
@@ -325,10 +351,13 @@ class PromotionGate:
             }
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        current_champ = self.registry.get_champion_artifact()
+        previous_champion_id = current_champ.artifact_id if current_champ else None
+
         reason = (
             f"Promoted via experiment {experiment_id}: {exp.hypothesis}"
             if not is_override
-            else f"OVERRIDE PROMOTION: {override_reason}"
+            else f"OVERRIDE PROMOTION by {actor}: {override_reason}"
         )
 
         manifest = self.registry.update_champion_manifest(
@@ -336,11 +365,13 @@ class PromotionGate:
             experiment_id=experiment_id,
             updated_at=now_iso,
             reason=reason,
+            previous_champion_id=previous_champion_id,
         )
 
         # Collision-resistant promotion ID
         promotion_id = f"prom_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
         mode = "MANUAL_OVERRIDE" if is_override else "MANUAL_VERIFIED"
+        challenger_art = self.registry.get_artifact(exp.challenger_artifact_id)
 
         self.db.save_promotion(
             promotion_id=promotion_id,
@@ -350,8 +381,14 @@ class PromotionGate:
             manifest_snapshot=manifest,
             reason=reason,
             mode=mode,
-            promoted_by=actor,
+            promoted_by=actor if actor else "evaluator",
             override_acknowledgement=acknowledge_risk if is_override else None,
+            previous_champion_id=previous_champion_id,
+            gate_violations_json=json.dumps(check_res["violations"])
+            if check_res["violations"]
+            else None,
+            artifact_manifest_hash=challenger_art.manifest_hash if challenger_art else None,
+            config_hash=getattr(exp, "config_hash", None),
         )
 
         exp.promotion_decision = "PROMOTED"
@@ -373,6 +410,15 @@ class PromotionGate:
     ) -> dict[str, Any]:
         """Roll back champion to a historical artifact with full audit record."""
         art = self.registry.get_artifact(historical_artifact_id)
+        from battlelab.bots.artifacts import verify_artifact_integrity
+
+        ok, err = verify_artifact_integrity(art)
+        if not ok:
+            raise PromotionGateError(f"Historical artifact integrity verification failed: {err}")
+
+        current_champ = self.registry.get_champion_artifact()
+        previous_champion_id = current_champ.artifact_id if current_champ else None
+
         now_iso = datetime.now(timezone.utc).isoformat()
         rollback_reason = f"Rollback: {reason}" if reason else "Manual rollback"
 
@@ -381,6 +427,7 @@ class PromotionGate:
             experiment_id="rollback",
             updated_at=now_iso,
             reason=rollback_reason,
+            previous_champion_id=previous_champion_id,
         )
 
         promotion_id = (
@@ -388,13 +435,15 @@ class PromotionGate:
         )
         self.db.save_promotion(
             promotion_id=promotion_id,
-            experiment_id="rollback",
+            experiment_id=None,
             artifact_id=art.artifact_id,
             promoted_at=now_iso,
             manifest_snapshot=manifest,
             reason=rollback_reason,
             mode="ROLLBACK",
             promoted_by=actor,
+            previous_champion_id=previous_champion_id,
+            artifact_manifest_hash=art.manifest_hash,
         )
 
         return {

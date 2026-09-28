@@ -22,7 +22,13 @@ def get_data_dir() -> Path:
 
 
 def get_artifacts_dir() -> Path:
-    p = get_data_dir() / "artifacts"
+    env_dir = os.environ.get("BATTLELAB_ARTIFACTS_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if not p.is_absolute():
+            p = get_project_root() / p
+    else:
+        p = get_data_dir() / "artifacts"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -40,7 +46,37 @@ def get_replays_dir() -> Path:
 
 
 def get_reports_dir() -> Path:
-    p = get_data_dir() / "reports"
+    reports_env = os.environ.get("BATTLELAB_REPORTS_DIR")
+    if reports_env:
+        p = Path(reports_env)
+        if not p.is_absolute():
+            p = get_project_root() / p
+    else:
+        p = get_data_dir() / "reports"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_runs_dir() -> Path:
+    runs_env = os.environ.get("BATTLELAB_RUNS_DIR")
+    if runs_env:
+        p = Path(runs_env)
+        if not p.is_absolute():
+            p = get_project_root() / p
+    else:
+        p = get_data_dir() / "runs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_scratch_dir() -> Path:
+    scratch_env = os.environ.get("BATTLELAB_SCRATCH_DIR")
+    if scratch_env:
+        p = Path(scratch_env)
+        if not p.is_absolute():
+            p = get_project_root() / p
+    else:
+        p = get_data_dir() / "scratch"
     p.mkdir(parents=True, exist_ok=True)
     return p
 

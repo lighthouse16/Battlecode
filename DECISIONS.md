@@ -53,3 +53,10 @@
 - **Decision**: Accurately diagnose and report memory limit support via `battlelab doctor`. On POSIX, support `resource.setrlimit`; on Windows, cleanly report unsupported status without crashing or faking support.
 - **Alternatives Considered**: Claiming universal cross-platform memory capping; forcing win32 dependencies.
 - **Why Chosen**: Adheres strictly to the engineering requirement of truthfulness over illusion of readiness.
+
+## ADR-010: Cryptographic Artifact Integrity and Fenced Worker Heartbeats
+- **Context**: Artifact snapshots can suffer from disk tampering or extraneous injected files, and slow workers could commit results after their leases have expired.
+- **Decision**: Compute cryptographic manifests (`manifest.json`) on artifact creation with SHA-256 hashes of every file and verify full tree integrity before running. Implement fencing tokens (`lease_token`) and heartbeat background threads during match execution so stale worker results are unconditionally rejected on lease expiration.
+- **Alternatives Considered**: Relying solely on root directory hash; unconditional result writes without lease verification.
+- **Why Chosen**: Guarantees complete immutability of registered artifacts and eliminates race conditions in distributed worker execution.
+

@@ -38,7 +38,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("=" * 60)
 
     # 1. Environment & Paths
-    from battlelab.bots.process_runner import check_memory_limit_support
+    from battlelab.bots.process_runner import (
+        get_memory_enforcement_details,
+    )
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     print(
@@ -51,8 +53,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(
         f"Database Path:        {get_database_path()} ({'Exists' if get_database_path().exists() else 'Missing'})"
     )
-    mem_ok, mem_msg = check_memory_limit_support()
-    print(f"Memory Safeguards:    {'SUPPORTED' if mem_ok else 'UNSUPPORTED'} ({mem_msg})")
+    mem_details = get_memory_enforcement_details()
+    print(
+        f"Memory Safeguards:    {mem_details['status']} ({mem_details['mechanism']}: {mem_details['detail']})"
+    )
 
     # 2. Adapters
     print("\nAdapters:")

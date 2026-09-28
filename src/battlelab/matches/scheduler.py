@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from battlelab.core.hashing import hash_dict
+from battlelab.core.identifiers import generate_match_id
 from battlelab.core.models import MatchSpec
 from battlelab.matches.worker import execute_match_job
 from battlelab.storage.database import Database
@@ -50,7 +51,11 @@ class TournamentScheduler:
         )
 
         for spec in specs:
-            spec.tournament_id = tournament_id
+            if not spec.tournament_id:
+                spec.tournament_id = tournament_id
+                raw_d = spec.to_dict()
+                raw_d["tournament_id"] = tournament_id
+                spec.match_id = generate_match_id(raw_d)
             self.db.save_match_spec(spec, created_at)
 
         return tournament_id
@@ -96,7 +101,13 @@ class TournamentScheduler:
 
                 # Execute claimed match job
                 spec_dict = json.loads(job["spec_json"])
-                res = execute_match_job(spec_dict, db_path_str)
+                res = execute_match_job(
+                    spec_dict=spec_dict,
+                    db_path=db_path_str,
+                    worker_id=job.get("worker_id", worker_id),
+                    lease_token=job.get("lease_token"),
+                    lease_duration_seconds=self.lease_duration_seconds,
+                )
                 with session_lock:
                     completed_in_session += 1
 

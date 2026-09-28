@@ -3,10 +3,16 @@ min_sample_size: 6
 min_segment_sample_size: 1
 min_win_rate: 0.50
 min_paired_mean_delta: 0.0
-require_positive_lower_ci: false
+min_weighted_win_delta: 0.0
+min_paired_win_delta_lower_bound: 0.0
+require_positive_lower_ci: true
+min_runtime_headroom: 0.10
+max_group_regression_delta: -0.15
+max_map_regression_delta: -0.20
+max_side_regression_delta: -0.25
 max_crash_rate: 0.0
 max_timeout_rate: 0.0
 max_invalid_action_rate: 0.0
 require_determinism_pass: true
-max_map_regression_tolerance: 0.25
 automatic_promotion: false
+
