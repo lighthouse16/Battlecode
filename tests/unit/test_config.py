@@ -2,6 +2,7 @@
 
 from battlelab.config.validation import validate_evaluation_config, validate_promotion_config
 
+
 def test_evaluation_validation():
     # Valid config
     valid_cfg = {
@@ -22,6 +23,7 @@ def test_evaluation_validation():
     }
     errs = validate_evaluation_config(invalid_cfg)
     assert len(errs) >= 3
+
 
 def test_promotion_validation():
     valid_prom = {

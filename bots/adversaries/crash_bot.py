@@ -1,5 +1,10 @@
-"""Adversarial Crash Test Bot."""
-from battlelab.adapters.mock.bots import policy_crash
+"""Executable Crash Bot Fixture."""
+import sys
 
-def run(state):
-    return policy_crash(state)
+def main():
+    sys.stderr.write("Simulating unhandled bot crash!\n")
+    sys.stderr.flush()
+    raise RuntimeError("Controlled fixture crash triggered!")
+
+if __name__ == "__main__":
+    main()

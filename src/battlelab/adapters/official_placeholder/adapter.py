@@ -21,7 +21,7 @@ from battlelab.core.models import (
 
 class OfficialPlaceholderAdapter(GameAdapter):
     """Placeholder adapter for official competition SDK.
-    
+
     All operational methods raise CapabilityNotSupportedError until official
     rules ingestion is performed via `docs/day_zero_rule_ingestion.md`.
     """
@@ -59,7 +59,9 @@ class OfficialPlaceholderAdapter(GameAdapter):
         return False, "Official competition bot format unknown pending rulebook release."
 
     def build_or_prepare_artifact(self, source_path: Path, output_dir: Path) -> dict[str, Any]:
-        raise CapabilityNotSupportedError("build_or_prepare_artifact", self.name, "Official SDK not released.")
+        raise CapabilityNotSupportedError(
+            "build_or_prepare_artifact", self.name, "Official SDK not released."
+        )
 
     def run_local_match(
         self,
@@ -68,16 +70,26 @@ class OfficialPlaceholderAdapter(GameAdapter):
         bot_b: BotArtifact,
         work_dir: Path,
     ) -> MatchResult:
-        raise CapabilityNotSupportedError("run_local_match", self.name, "Official game engine not installed.")
+        raise CapabilityNotSupportedError(
+            "run_local_match", self.name, "Official game engine not installed."
+        )
 
     def run_remote_test(self, bot_artifact: BotArtifact) -> dict[str, Any]:
-        raise CapabilityNotSupportedError("run_remote_test", self.name, "Official ladder/API not configured.")
+        raise CapabilityNotSupportedError(
+            "run_remote_test", self.name, "Official ladder/API not configured."
+        )
 
     def submit_artifact(self, bot_artifact: BotArtifact, dry_run: bool = True) -> dict[str, Any]:
-        raise CapabilityNotSupportedError("submit_artifact", self.name, "Submission endpoints unknown.")
+        raise CapabilityNotSupportedError(
+            "submit_artifact", self.name, "Submission endpoints unknown."
+        )
 
     def list_official_matches(self) -> list[dict[str, Any]]:
-        raise CapabilityNotSupportedError("list_official_matches", self.name, "Official match listing unavailable.")
+        raise CapabilityNotSupportedError(
+            "list_official_matches", self.name, "Official match listing unavailable."
+        )
 
     def parse_replay(self, replay_path: Path) -> dict[str, Any]:
-        raise CapabilityNotSupportedError("parse_replay", self.name, "Official replay schema unknown.")
+        raise CapabilityNotSupportedError(
+            "parse_replay", self.name, "Official replay schema unknown."
+        )

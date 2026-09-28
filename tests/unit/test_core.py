@@ -1,18 +1,20 @@
 """Unit tests for battlelab core: models, hashing, identifiers, errors."""
 
-import json
 from pathlib import Path
+
 from battlelab.core.hashing import hash_bytes, hash_dict, hash_file
-from battlelab.core.identifiers import generate_match_id, generate_artifact_id, generate_experiment_id
+from battlelab.core.identifiers import (
+    generate_artifact_id,
+    generate_experiment_id,
+    generate_match_id,
+)
 from battlelab.core.models import (
-    MatchOutcome,
     FailureCategory,
     FailureClassification,
-    BotArtifact,
-    MatchSpec,
+    MatchOutcome,
     MatchResult,
-    Experiment,
 )
+
 
 def test_hashing_canonical(tmp_path: Path):
     d1 = {"b": 2, "a": 1}
@@ -22,6 +24,7 @@ def test_hashing_canonical(tmp_path: Path):
     test_file = tmp_path / "hello.txt"
     test_file.write_text("battlelab", encoding="utf-8")
     assert hash_file(test_file) == hash_bytes(b"battlelab")
+
 
 def test_identifiers():
     spec = {
@@ -44,6 +47,7 @@ def test_identifiers():
 
     exp_id = generate_experiment_id()
     assert exp_id.startswith("exp_")
+
 
 def test_models_serialization():
     fc = FailureClassification(

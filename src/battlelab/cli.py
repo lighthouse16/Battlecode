@@ -38,11 +38,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("=" * 60)
 
     # 1. Environment & Paths
+    from battlelab.bots.process_runner import check_memory_limit_support
+
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    print(f"Python Version:       {py_ver} ({'OK' if sys.version_info >= (3, 11) else 'WARN: <3.11'})")
+    print(
+        f"Python Version:       {py_ver} ({'OK' if sys.version_info >= (3, 11) else 'WARN: <3.11'})"
+    )
     print(f"Project Root:         {get_project_root()}")
-    print(f"Data Directory:       {get_data_dir()} ({'Exists' if get_data_dir().exists() else 'Missing'})")
-    print(f"Database Path:        {get_database_path()} ({'Exists' if get_database_path().exists() else 'Missing'})")
+    print(
+        f"Data Directory:       {get_data_dir()} ({'Exists' if get_data_dir().exists() else 'Missing'})"
+    )
+    print(
+        f"Database Path:        {get_database_path()} ({'Exists' if get_database_path().exists() else 'Missing'})"
+    )
+    mem_ok, mem_msg = check_memory_limit_support()
+    print(f"Memory Safeguards:    {'SUPPORTED' if mem_ok else 'UNSUPPORTED'} ({mem_msg})")
 
     # 2. Adapters
     print("\nAdapters:")
@@ -101,7 +111,7 @@ def cmd_adapters(args: argparse.Namespace) -> int:
         maps = adapter.discover_maps()
         print(f"Adapter: {adapter.name} (v{adapter.version})")
         print(f"Game Version: {caps.game_version}")
-        print(f"Capabilities:")
+        print("Capabilities:")
         print(f"  Local Matches:    {caps.can_run_local}")
         print(f"  Remote Tests:     {caps.can_run_remote}")
         print(f"  Official Submit:  {caps.can_submit}")
@@ -124,7 +134,7 @@ def cmd_bot(args: argparse.Namespace) -> int:
             language=args.language,
             tags=tags,
         )
-        print(f"Registered Bot Artifact:")
+        print("Registered Bot Artifact:")
         print(f"  Artifact ID:     {art.artifact_id}")
         print(f"  Display Name:    {art.display_name}")
         print(f"  Source Hash:     {art.source_hash}")
@@ -183,11 +193,12 @@ def cmd_match(args: argparse.Namespace) -> int:
 
     # Save spec to DB
     from datetime import datetime, timezone
+
     db.save_match_spec(spec, datetime.now(timezone.utc).isoformat())
 
     print(f"Executing match {match_id} on {args.map} (seed {args.seed})...")
     res = execute_match_job(spec.to_dict())
-    print(f"Match Finished:")
+    print("Match Finished:")
     print(f"  Outcome:        {res.get('outcome')}")
     print(f"  Winner:         {res.get('winner')}")
     print(f"  Score A:        {res.get('score_a')}")
@@ -204,8 +215,9 @@ def cmd_tournament(args: argparse.Namespace) -> int:
 
     if args.action == "run":
         from battlelab.config.loader import load_yaml_config
+
         cfg = load_yaml_config(args.config)
-        
+
         bot_a_id = args.bot_a
         bot_b_id = args.bot_b
         if not bot_a_id or not bot_b_id:
@@ -218,6 +230,7 @@ def cmd_tournament(args: argparse.Namespace) -> int:
             bot_b_id = bot_b_id or arts[1].artifact_id
 
         from battlelab.core.identifiers import generate_tournament_id
+
         t_id = generate_tournament_id()
         specs = generate_match_matrix(
             bot_a_id=bot_a_id,
@@ -233,13 +246,17 @@ def cmd_tournament(args: argparse.Namespace) -> int:
         scheduler.create_tournament(t_id, f"Tournament {t_id}", specs, cfg)
         print(f"Launched Tournament {t_id} with {len(specs)} matches...")
         res = scheduler.run_tournament(t_id)
-        print(f"Tournament Finished: Status={res['status']} ({res['completed_matches']}/{res['total_matches']} complete)")
+        print(
+            f"Tournament Finished: Status={res['status']} ({res['completed_matches']}/{res['total_matches']} complete)"
+        )
         return 0
 
     elif args.action == "resume":
         print(f"Resuming Tournament {args.tournament_id}...")
         res = scheduler.run_tournament(args.tournament_id)
-        print(f"Tournament Finished: Status={res['status']} ({res['completed_matches']}/{res['total_matches']} complete)")
+        print(
+            f"Tournament Finished: Status={res['status']} ({res['completed_matches']}/{res['total_matches']} complete)"
+        )
         return 0
 
     elif args.action == "status":
@@ -272,7 +289,7 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             challenger_artifact_id=args.challenger,
             intended_change=args.change,
         )
-        print(f"Created Experiment:")
+        print("Created Experiment:")
         print(f"  Experiment ID: {exp.experiment_id}")
         print(f"  Hypothesis:    {exp.hypothesis}")
         print(f"  Challenger:    {exp.challenger_artifact_id}")
@@ -305,18 +322,65 @@ def cmd_experiment(args: argparse.Namespace) -> int:
 
     elif args.action == "promote":
         dry_run = args.dry_run
-        force = args.force
+        actor = getattr(args, "actor", "human")
+        override_reason = getattr(args, "override_reason", None)
+        acknowledge_risk = getattr(args, "acknowledge_risk", None)
         try:
-            res = gate.promote(args.experiment_id, dry_run=dry_run, force=force)
+            res = gate.promote(
+                args.experiment_id,
+                dry_run=dry_run,
+                actor=actor,
+                override_reason=override_reason,
+                acknowledge_risk=acknowledge_risk,
+            )
             if dry_run:
                 print(f"[DRY-RUN] Promotion check passed: Would promote {res['would_promote']}")
+                if res.get("is_override"):
+                    print(
+                        "  WARNING: This dry-run was evaluated under human override acknowledgement!"
+                    )
             else:
-                print(f"Successfully PROMOTED {res['champion_artifact_id']} as Champion!")
+                print(
+                    f"Successfully PROMOTED {res['champion_artifact_id']} as Champion! (Mode: {res.get('mode')})"
+                )
             return 0
         except Exception as e:
             print(f"Promotion Failed: {e}")
             return 1
 
+    return 1
+
+
+def cmd_champion(args: argparse.Namespace) -> int:
+    """Champion manifest inspection and rollback commands."""
+    db = Database()
+    registry = BotRegistry(db)
+    gate = PromotionGate(db)
+
+    if args.action == "status":
+        champ = registry.get_champion_artifact()
+        if not champ:
+            print("No active champion artifact registered.")
+            return 0
+        print("Active Champion Artifact:")
+        print(f"  Artifact ID:     {champ.artifact_id}")
+        print(f"  Display Name:    {champ.display_name}")
+        print(f"  Source Hash:     {champ.source_hash}")
+        print(f"  Created At:      {champ.created_at}")
+        return 0
+
+    elif args.action == "rollback":
+        reason = getattr(args, "reason", "Manual rollback via CLI")
+        actor = getattr(args, "actor", "human")
+        try:
+            res = gate.rollback(args.artifact_id, reason=reason, actor=actor)
+            print(
+                f"Successfully ROLLED BACK champion to {res['champion_artifact_id']} (Reason: {reason})"
+            )
+            return 0
+        except Exception as e:
+            print(f"Rollback Failed: {e}")
+            return 1
     return 1
 
 
@@ -350,11 +414,13 @@ def cmd_official(args: argparse.Namespace) -> int:
         off = get_adapter("official_placeholder")
         caps = off.get_capabilities()
         print("Official Competition Integration Status:")
-        print(f"  Status:       UNRELEASED")
-        print(f"  Rulebook Ingested: NO")
-        print(f"  SDK Installed:    NO")
+        print("  Status:       UNRELEASED")
+        print("  Rulebook Ingested: NO")
+        print("  SDK Installed:    NO")
         print(f"  Capability:   can_run_local={caps.can_run_local}, can_submit={caps.can_submit}")
-        print("  Instructions: When competition releases rules, follow docs/day_zero_rule_ingestion.md")
+        print(
+            "  Instructions: When competition releases rules, follow docs/day_zero_rule_ingestion.md"
+        )
         return 0
 
     elif args.action == "integrate":
@@ -399,7 +465,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # bot
     p_bot = subparsers.add_parser("bot", help="Bot registration and artifacts")
     p_bot_sub = p_bot.add_subparsers(dest="action", required=True)
-    p_bot_reg = p_bot_sub.add_parser("register", help="Register a bot source into an immutable artifact")
+    p_bot_reg = p_bot_sub.add_parser(
+        "register", help="Register a bot source into an immutable artifact"
+    )
     p_bot_reg.add_argument("path", help="Path to bot source file or directory")
     p_bot_reg.add_argument("--name", help="Display name")
     p_bot_reg.add_argument("--language", default="python", help="Language/runtime")
@@ -424,7 +492,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_tourn = subparsers.add_parser("tournament", help="Tournament operations")
     p_tourn_sub = p_tourn.add_subparsers(dest="action", required=True)
     p_tourn_run = p_tourn_sub.add_parser("run", help="Run tournament from config")
-    p_tourn_run.add_argument("--config", default="configs/evaluation.yaml", help="Evaluation config path")
+    p_tourn_run.add_argument(
+        "--config", default="configs/evaluation.yaml", help="Evaluation config path"
+    )
     p_tourn_run.add_argument("--bot-a", help="Optional Bot A artifact ID")
     p_tourn_run.add_argument("--bot-b", help="Optional Bot B artifact ID")
     p_tourn_run.add_argument("--workers", type=int, default=4, help="Worker count")
@@ -457,8 +527,31 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p_exp_prom = p_exp_sub.add_parser("promote", help="Evaluate and promote experiment challenger")
     p_exp_prom.add_argument("experiment_id", help="Experiment ID")
-    p_exp_prom.add_argument("--dry-run", action="store_true", help="Perform gate check without promoting")
-    p_exp_prom.add_argument("--force", action="store_true", help="Force promotion bypassing criteria")
+    p_exp_prom.add_argument(
+        "--dry-run", action="store_true", help="Perform gate check without promoting"
+    )
+    p_exp_prom.add_argument(
+        "--actor", default="human", help="Identity of person triggering promotion"
+    )
+    p_exp_prom.add_argument(
+        "--override-reason", help="Mandatory justification if overriding failed gates"
+    )
+    p_exp_prom.add_argument(
+        "--acknowledge-risk", help="Mandatory text acknowledgement (I_ACKNOWLEDGE_STATISTICAL_RISK)"
+    )
+
+    # champion
+    p_champ = subparsers.add_parser("champion", help="Champion operations and rollback")
+    p_champ_sub = p_champ.add_subparsers(dest="action", required=True)
+    p_champ_sub.add_parser("status", help="View active champion")
+    p_champ_rb = p_champ_sub.add_parser(
+        "rollback", help="Roll back champion to a historical artifact"
+    )
+    p_champ_rb.add_argument("artifact_id", help="Historical artifact ID")
+    p_champ_rb.add_argument("--reason", default="Manual rollback", help="Reason for rollback")
+    p_champ_rb.add_argument(
+        "--actor", default="human", help="Identity of actor performing rollback"
+    )
 
     # replay
     p_rep = subparsers.add_parser("replay", help="Replay inspection")
@@ -492,6 +585,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_tournament(parsed)
     elif parsed.command == "experiment":
         return cmd_experiment(parsed)
+    elif parsed.command == "champion":
+        return cmd_champion(parsed)
     elif parsed.command == "replay":
         return cmd_replay(parsed)
     elif parsed.command == "official":

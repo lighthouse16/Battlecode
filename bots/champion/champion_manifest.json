@@ -1,6 +1,6 @@
 {
-  "champion_artifact_id": "art_47bc9d6e6c8bb610",
+  "champion_artifact_id": "art_b60ad9b38f825628",
   "experiment_id": "rollback",
-  "updated_at": "2026-09-28T05:41:16.460873+00:00",
-  "reason": "Rollback: Manual safety rollback"
+  "updated_at": "2026-09-28T06:38:10.218801+00:00",
+  "reason": "Rollback: Reverting test crash bot back to stable random baseline"
 }

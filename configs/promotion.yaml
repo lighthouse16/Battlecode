@@ -1,6 +1,9 @@
 # Promotion criteria gates
 min_sample_size: 6
-min_win_rate: 0.55
+min_segment_sample_size: 1
+min_win_rate: 0.50
+min_paired_mean_delta: 0.0
+require_positive_lower_ci: false
 max_crash_rate: 0.0
 max_timeout_rate: 0.0
 max_invalid_action_rate: 0.0

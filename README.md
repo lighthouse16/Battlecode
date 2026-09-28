@@ -110,14 +110,22 @@ Promote an experiment's challenger only if it meets all configured gates:
 # Dry run verification
 battlelab experiment promote <EXPERIMENT_ID> --dry-run
 
-# Actual promotion
+# Actual promotion (enforces statistical gates, zero crashes, and determinism)
 battlelab experiment promote <EXPERIMENT_ID>
-```
 
-To roll back to a historical champion artifact:
-```python
-from battlelab.experiments.promotion import PromotionGate
-PromotionGate().rollback("<HISTORICAL_ARTIFACT_ID>", reason="Safety rollback")
+# Deliberate human override (requires explicit identity, justification, and acknowledgement)
+battlelab experiment promote <EXPERIMENT_ID> \
+  --actor "researcher_name" \
+  --override-reason "Controlled benchmark exception" \
+  --acknowledge-risk I_ACKNOWLEDGE_STATISTICAL_RISK
+
+# Inspect current champion status
+battlelab champion status
+
+# Atomically roll back to a historical champion artifact with full audit logging
+battlelab champion rollback <HISTORICAL_ARTIFACT_ID> \
+  --reason "Safety rollback after defect detected" \
+  --actor "lead_engineer_name"
 ```
 
 ### 4.9 Inspect and Verify Replays

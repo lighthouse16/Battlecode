@@ -2,7 +2,7 @@
 
 import sqlite3
 
-SCHEMA_V1 = """
+BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE TABLE IF NOT EXISTS tournaments (
     tournament_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING, RUNNING, COMPLETED, INTERRUPTED, FAILED
+    status TEXT NOT NULL DEFAULT 'PENDING',
     config_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
     completed_at TEXT,
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS matches (
     match_id TEXT PRIMARY KEY,
     tournament_id TEXT,
     experiment_id TEXT,
+    pair_id TEXT,
     adapter_name TEXT NOT NULL,
     adapter_version TEXT NOT NULL,
     bot_a_id TEXT NOT NULL,
@@ -48,7 +49,13 @@ CREATE TABLE IF NOT EXISTS matches (
     map_name TEXT NOT NULL,
     seed INTEGER NOT NULL,
     side_assignment_json TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING, RUNNING, COMPLETED, FAILED
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    worker_id TEXT,
+    lease_timestamp TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    last_infrastructure_error TEXT,
     retry_attempt INTEGER NOT NULL DEFAULT 0,
     outcome TEXT,
     winner TEXT,
@@ -87,7 +94,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     baseline_artifact_id TEXT NOT NULL,
     challenger_artifact_id TEXT NOT NULL,
     intended_change TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'CREATED', -- CREATED, RUNNING, COMPLETED, FAILED
+    status TEXT NOT NULL DEFAULT 'CREATED',
     created_at TEXT NOT NULL,
     completed_at TEXT,
     evaluation_matrix_json TEXT NOT NULL DEFAULT '{}',
@@ -102,23 +109,55 @@ CREATE TABLE IF NOT EXISTS experiments (
 
 CREATE TABLE IF NOT EXISTS promotions (
     promotion_id TEXT PRIMARY KEY,
-    experiment_id TEXT NOT NULL,
+    experiment_id TEXT,
     artifact_id TEXT NOT NULL,
     promoted_at TEXT NOT NULL,
     promoted_by TEXT NOT NULL DEFAULT 'system',
-    mode TEXT NOT NULL DEFAULT 'MANUAL', -- AUTOMATIC, MANUAL
+    mode TEXT NOT NULL DEFAULT 'MANUAL',
     manifest_snapshot_json TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id),
+    override_acknowledgement TEXT,
     FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
 );
 """
 
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
-    """Apply database schema and migrations."""
+    """Apply database schema and upgrade missing columns gracefully."""
     with conn:
-        conn.executescript(SCHEMA_V1)
+        conn.executescript(BASE_SCHEMA)
+
+        # Check existing columns in matches and add missing ones
         cur = conn.cursor()
-        cur.execute("SELECT version FROM schema_version WHERE version = 1")
+        cur.execute("PRAGMA table_info(matches)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+
+        new_cols = [
+            ("pair_id", "TEXT"),
+            ("worker_id", "TEXT"),
+            ("lease_timestamp", "TEXT"),
+            ("lease_expires_at", "TEXT"),
+            ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("max_attempts", "INTEGER NOT NULL DEFAULT 3"),
+            ("last_infrastructure_error", "TEXT"),
+        ]
+        for col_name, col_type in new_cols:
+            if col_name not in existing_cols:
+                try:
+                    conn.execute(f"ALTER TABLE matches ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_pair ON matches(pair_id)")
+
+        cur.execute("PRAGMA table_info(promotions)")
+        existing_prom_cols = {row[1] for row in cur.fetchall()}
+        if "override_acknowledgement" not in existing_prom_cols:
+            try:
+                conn.execute("ALTER TABLE promotions ADD COLUMN override_acknowledgement TEXT")
+            except Exception:
+                pass
+
+        cur.execute("SELECT version FROM schema_version WHERE version = 2")
         if not cur.fetchone():
-            cur.execute("INSERT INTO schema_version (version) VALUES (1)")
+            cur.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (2)")

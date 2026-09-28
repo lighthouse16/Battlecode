@@ -1,8 +1,9 @@
 """Unit tests for analysis, confidence intervals, and failure classifier."""
 
-from battlelab.analysis.confidence import wilson_score_interval, paired_bootstrap_difference
+from battlelab.analysis.confidence import paired_bootstrap_difference, wilson_score_interval
 from battlelab.analysis.failure_classifier import FailureClassifier
 from battlelab.core.models import FailureCategory
+
 
 def test_wilson_score_interval():
     # 0 successes out of 10
@@ -19,11 +20,13 @@ def test_wilson_score_interval():
     low, high = wilson_score_interval(5, 10)
     assert low < 0.5 < high
 
+
 def test_paired_bootstrap():
     diffs = [1.0, 2.0, 1.5, 0.5, 2.5]
     mean, ci_low, ci_high = paired_bootstrap_difference(diffs, num_samples=500, seed=123)
     assert ci_low <= mean <= ci_high
     assert mean == 1.5
+
 
 def test_failure_classifier_taxonomy():
     # 1. Bot crash

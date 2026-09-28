@@ -1,11 +1,12 @@
 """Integration tests for TournamentScheduler, resumability, and matrix generation."""
 
 from pathlib import Path
+
 from battlelab.bots.registry import BotRegistry
-from battlelab.core.models import MatchSpec
 from battlelab.matches.matrix import generate_match_matrix
 from battlelab.matches.scheduler import TournamentScheduler
 from battlelab.storage.database import Database
+
 
 def test_tournament_execution_and_resumability(tmp_path: Path):
     db_file = tmp_path / "tourn_test.db"

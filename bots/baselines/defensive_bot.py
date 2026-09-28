@@ -1,4 +1,4 @@
-"""Executable Aggressive Bot.
+"""Executable Defensive Bot.
 
 Protocol: Reads JSON state per turn from stdin, writes JSON action to stdout.
 """
@@ -6,6 +6,8 @@ import sys
 import json
 
 def main():
+    turn_idx = 0
+    directions = ["RIGHT", "DOWN", "LEFT", "UP"]
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -19,24 +21,18 @@ def main():
             break
 
         my_pos = state.get("your_pos", [0, 0])
-        opp_pos = state.get("opponent_pos", [0, 0])
         claimed = state.get("claimed_tiles", [])
         already_claimed = any(t.get("x") == my_pos[0] and t.get("y") == my_pos[1] for t in claimed)
 
-        if not already_claimed and state.get("turn", 0) % 2 == 0:
+        if not already_claimed:
             action = {"type": "CLAIM"}
         else:
-            dx = opp_pos[0] - my_pos[0]
-            dy = opp_pos[1] - my_pos[1]
-            if abs(dx) >= abs(dy) and dx != 0:
-                action = {"type": "MOVE", "direction": "RIGHT" if dx > 0 else "LEFT"}
-            elif dy != 0:
-                action = {"type": "MOVE", "direction": "DOWN" if dy > 0 else "UP"}
-            else:
-                action = {"type": "CLAIM"}
+            turn = state.get("turn", turn_idx)
+            action = {"type": "MOVE", "direction": directions[turn % 4]}
 
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()
+        turn_idx += 1
 
 if __name__ == "__main__":
     main()

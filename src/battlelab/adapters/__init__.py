@@ -10,14 +10,23 @@ _ADAPTERS: dict[str, type[GameAdapter]] = {
     "official": OfficialPlaceholderAdapter,
 }
 
+
 def get_adapter(name: str) -> GameAdapter:
     """Instantiate adapter by name."""
     if name not in _ADAPTERS:
         raise KeyError(f"Unknown adapter '{name}'. Available: {list(_ADAPTERS.keys())}")
     return _ADAPTERS[name]()
 
+
 def list_adapters() -> list[str]:
     """List registered adapter names."""
     return sorted(list(_ADAPTERS.keys()))
 
-__all__ = ["GameAdapter", "MockAdapter", "OfficialPlaceholderAdapter", "get_adapter", "list_adapters"]
+
+__all__ = [
+    "GameAdapter",
+    "MockAdapter",
+    "OfficialPlaceholderAdapter",
+    "get_adapter",
+    "list_adapters",
+]

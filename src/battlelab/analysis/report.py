@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from battlelab.core.models import Experiment
 
 
@@ -19,7 +20,7 @@ def generate_experiment_report(
     win_rate = agg.get("win_rate", 0.0) * 100
     ci = agg.get("wilson_ci_95", [0.0, 0.0])
     ci_pct = [round(c * 100, 1) for c in ci]
-    
+
     passed_gates = gate_results.get("passed", False) if gate_results else False
     violations = gate_results.get("violations", []) if gate_results else []
 
@@ -58,30 +59,41 @@ def generate_experiment_report(
     ]
 
     for map_name, stats in agg.get("by_map", {}).items():
-        lines.append(f"- **{map_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L ({stats.get('total', 0)} matches)")
+        lines.append(
+            f"- **{map_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L ({stats.get('total', 0)} matches)"
+        )
 
-    lines.extend([
-        "",
-        "### By Side",
-    ])
+    lines.extend(
+        [
+            "",
+            "### By Side",
+        ]
+    )
     for side_name, stats in agg.get("by_side", {}).items():
         lines.append(f"- **{side_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L")
 
-    lines.extend([
-        "",
-        "## 6. Worst Regressions",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 6. Worst Regressions",
+        ]
+    )
     if worst_reg:
         for reg in worst_reg:
-            lines.append(f"- Match `{reg['match_id']}` on `{reg['map']}` (seed {reg['seed']}): Deficit {reg['deficit']:.1f}")
+            id_str = reg.get("pair_id") or reg.get("match_id", "unknown")
+            lines.append(
+                f"- Pair/Match `{id_str}` on `{reg.get('map', 'unknown')}` (seed {reg.get('seed', 0)}): Deficit {reg.get('deficit', 0.0):.1f}"
+            )
     else:
         lines.append("No regressions observed against baseline.")
 
-    lines.extend([
-        "",
-        "## 7. Promotion Gates & Decision",
-        f"- **Promotion Passed**: {'YES' if passed_gates else 'NO'}",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 7. Promotion Gates & Decision",
+            f"- **Promotion Passed**: {'YES' if passed_gates else 'NO'}",
+        ]
+    )
     if violations:
         lines.append("### Gate Violations:")
         for v in violations:
@@ -89,10 +101,12 @@ def generate_experiment_report(
     elif passed_gates:
         lines.append("All promotion criteria satisfied.")
 
-    lines.extend([
-        "",
-        "## 8. Recommended Next Experiment",
-        "Investigate worst regression matchups or test broader opponent pool diversity.",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 8. Recommended Next Experiment",
+            "Investigate worst regression matchups or test broader opponent pool diversity.",
+        ]
+    )
 
     return "\n".join(lines)

@@ -1,23 +1,33 @@
-# Opponent pool definition
-# NOTE: Infrastructure fixtures only, not strategic assumptions about future competition.
+# Opponent pool definition with groups and weights
+# NOTE: Infrastructure test fixtures only, not strategic assumptions.
 opponents:
   - id: baseline_fixed
     name: Fixed Deterministic Baseline
-    policy: fixed
+    path: bots/baselines/fixed_bot.py
+    group: basic
+    weight: 1.0
     tags: ["baseline", "policy:fixed"]
   - id: baseline_random
-    name: Random Pseudo-Random Baseline
-    policy: random
+    name: Random Baseline
+    path: bots/baselines/random_bot.py
+    group: basic
+    weight: 1.0
     tags: ["baseline", "policy:random"]
   - id: baseline_resource
     name: Resource Greedy Proxy
-    policy: resource
+    path: bots/baselines/resource_bot.py
+    group: strategy
+    weight: 2.0
     tags: ["baseline", "policy:resource"]
   - id: baseline_aggressive
     name: Aggressive Proxy
-    policy: aggressive
+    path: bots/baselines/aggressive_bot.py
+    group: strategy
+    weight: 1.5
     tags: ["baseline", "policy:aggressive"]
   - id: baseline_defensive
     name: Defensive Proxy
-    policy: defensive
+    path: bots/baselines/defensive_bot.py
+    group: strategy
+    weight: 1.5
     tags: ["baseline", "policy:defensive"]

@@ -7,7 +7,7 @@ and carry zero assumptions about official competition rules.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+
 
 @dataclass(frozen=True)
 class MockMap:
@@ -19,6 +19,7 @@ class MockMap:
     resource_grid: tuple[tuple[int, ...], ...]
     turn_limit: int = 40
 
+
 def generate_grid_map(name: str, width: int, height: int, turn_limit: int = 40) -> MockMap:
     """Generate a symmetric synthetic grid map."""
     rows: list[tuple[int, ...]] = []
@@ -29,7 +30,7 @@ def generate_grid_map(name: str, width: int, height: int, turn_limit: int = 40) 
             val = ((x * 3 + y * 7 + 1) % 5) + 1
             row.append(val)
         rows.append(tuple(row))
-    
+
     spawn_a = (0, 0)
     spawn_b = (width - 1, height - 1)
     return MockMap(
@@ -41,6 +42,7 @@ def generate_grid_map(name: str, width: int, height: int, turn_limit: int = 40) 
         resource_grid=tuple(rows),
         turn_limit=turn_limit,
     )
+
 
 MOCK_MAPS: dict[str, MockMap] = {
     "grid_tiny_4x4": generate_grid_map("grid_tiny_4x4", 4, 4, turn_limit=20),

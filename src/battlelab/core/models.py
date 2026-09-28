@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -118,6 +118,8 @@ class MatchSpec:
     memory_limit_mb: int = 512
     config_hash: str = ""
     retry_attempt: int = 0
+    max_attempts: int = 3
+    pair_id: str | None = None
     experiment_id: str | None = None
     tournament_id: str | None = None
 

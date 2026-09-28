@@ -1,15 +1,19 @@
 """Contract tests for GameAdapter implementations."""
 
 from pathlib import Path
+
 import pytest
+
 from battlelab.adapters import get_adapter, list_adapters
 from battlelab.core.errors import CapabilityNotSupportedError
-from battlelab.core.models import BotArtifact, MatchSpec, MatchOutcome
+from battlelab.core.models import BotArtifact, MatchSpec
+
 
 def test_adapter_listing():
     adapters = list_adapters()
     assert "mock" in adapters
     assert "official_placeholder" in adapters
+
 
 def test_mock_adapter_contract(tmp_path: Path):
     mock = get_adapter("mock")
@@ -72,6 +76,7 @@ def test_mock_adapter_contract(tmp_path: Path):
     parsed = mock.parse_replay(Path(res1.replay_path))
     assert parsed["total_frames"] > 0
 
+
 def test_mock_seed_variation(tmp_path: Path):
     mock = get_adapter("mock")
     bot_a = BotArtifact(
@@ -118,6 +123,7 @@ def test_mock_seed_variation(tmp_path: Path):
     res2 = mock.run_local_match(spec2, bot_a, bot_b, tmp_path / "seed2")
     # Different seeds should produce different replay hashes or trajectories
     assert res1.replay_hash != res2.replay_hash
+
 
 def test_official_placeholder_contract(tmp_path: Path):
     off = get_adapter("official_placeholder")

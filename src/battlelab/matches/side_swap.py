@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 SIDE_NORMAL = {"A": "side_0", "B": "side_1"}
 SIDE_SWAPPED = {"A": "side_1", "B": "side_0"}
 

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
 
-from battlelab.core.errors import StorageError
 from battlelab.core.models import (
     BotArtifact,
     Experiment,
@@ -203,16 +201,17 @@ class Database:
                 conn.execute(
                     """
                     INSERT INTO matches (
-                        match_id, tournament_id, experiment_id, adapter_name, adapter_version,
+                        match_id, tournament_id, experiment_id, pair_id, adapter_name, adapter_version,
                         bot_a_id, bot_b_id, map_name, seed, side_assignment_json, status,
-                        retry_attempt, created_at, spec_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
+                        attempt_count, max_attempts, retry_attempt, created_at, spec_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?)
                     ON CONFLICT(match_id) DO NOTHING
                     """,
                     (
                         spec.match_id,
                         spec.tournament_id,
                         spec.experiment_id,
+                        spec.pair_id,
                         spec.adapter_name,
                         spec.adapter_version,
                         spec.bot_a_id,
@@ -220,21 +219,120 @@ class Database:
                         spec.map_name,
                         spec.seed,
                         json.dumps(spec.side_assignment),
+                        spec.max_attempts,
                         spec.retry_attempt,
                         created_at,
                         json.dumps(spec.to_dict()),
                     ),
                 )
 
+    def lease_next_match(
+        self,
+        tournament_id: str | None = None,
+        worker_id: str = "default_worker",
+        lease_duration_seconds: float = 30.0,
+    ) -> dict[str, Any] | None:
+        """Atomically claim a pending or recoverable match under a lease."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        lease_expires_iso = datetime.fromtimestamp(
+            now.timestamp() + lease_duration_seconds, timezone.utc
+        ).isoformat()
+
+        with self.connect() as conn:
+            while True:
+                with conn:
+                    if tournament_id is not None:
+                        query = """
+                        SELECT * FROM matches
+                        WHERE tournament_id = ?
+                          AND (
+                              status IN ('PENDING', 'RETRYABLE_FAILURE')
+                              OR (status = 'RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+                          )
+                          AND attempt_count < max_attempts
+                        ORDER BY rowid ASC
+                        LIMIT 1
+                        """
+                        row = conn.execute(query, (tournament_id, now_iso)).fetchone()
+                    else:
+                        query = """
+                        SELECT * FROM matches
+                        WHERE (
+                              status IN ('PENDING', 'RETRYABLE_FAILURE')
+                              OR (status = 'RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+                          )
+                          AND attempt_count < max_attempts
+                        ORDER BY rowid ASC
+                        LIMIT 1
+                        """
+                        row = conn.execute(query, (now_iso,)).fetchone()
+
+                    if not row:
+                        return None
+
+                    match_id = row["match_id"]
+                    cur = conn.execute(
+                        """
+                        UPDATE matches SET
+                            status = 'RUNNING',
+                            worker_id = ?,
+                            lease_timestamp = ?,
+                            lease_expires_at = ?,
+                            attempt_count = attempt_count + 1
+                        WHERE match_id = ?
+                          AND (
+                              status IN ('PENDING', 'RETRYABLE_FAILURE')
+                              OR (status = 'RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+                          )
+                        """,
+                        (worker_id, now_iso, lease_expires_iso, match_id, now_iso),
+                    )
+                    if cur.rowcount == 0:
+                        continue
+
+                    updated_row = conn.execute(
+                        "SELECT * FROM matches WHERE match_id = ?", (match_id,)
+                    ).fetchone()
+                    return dict(updated_row) if updated_row else None
+
     def update_match_result(self, result: MatchResult) -> None:
         with self.connect() as conn:
             with conn:
-                fc_cat = result.failure_classification.category.value if result.failure_classification else None
-                fc_json = json.dumps(result.failure_classification.to_dict()) if result.failure_classification else None
+                fc_cat = (
+                    result.failure_classification.category.value
+                    if result.failure_classification
+                    else None
+                )
+                fc_json = (
+                    json.dumps(result.failure_classification.to_dict())
+                    if result.failure_classification
+                    else None
+                )
+                evidence = (
+                    result.failure_classification.evidence
+                    if result.failure_classification
+                    else None
+                )
+
+                # Determine terminal vs retryable failure vs completed
+                if result.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE:
+                    row = conn.execute(
+                        "SELECT attempt_count, max_attempts FROM matches WHERE match_id = ?",
+                        (result.match_id,),
+                    ).fetchone()
+                    attempts = row["attempt_count"] if row else 1
+                    max_att = row["max_attempts"] if row else 3
+                    status = "TERMINAL_FAILURE" if attempts >= max_att else "RETRYABLE_FAILURE"
+                else:
+                    status = "COMPLETED"
+
                 conn.execute(
                     """
                     UPDATE matches SET
-                        status = 'COMPLETED',
+                        status = ?,
                         outcome = ?,
                         winner = ?,
                         score_a = ?,
@@ -253,11 +351,14 @@ class Database:
                         stderr_path = ?,
                         failure_category = ?,
                         failure_json = ?,
+                        last_infrastructure_error = ?,
+                        lease_expires_at = NULL,
                         completed_at = ?,
                         result_json = ?
                     WHERE match_id = ?
                     """,
                     (
+                        status,
                         result.outcome.value,
                         result.winner,
                         result.score_a,
@@ -276,6 +377,7 @@ class Database:
                         result.stderr_path,
                         fc_cat,
                         fc_json,
+                        evidence,
                         result.completed_at,
                         json.dumps(result.to_dict()),
                         result.match_id,
@@ -363,7 +465,9 @@ class Database:
                 completed_at=row["completed_at"],
                 evaluation_matrix=json.loads(row["evaluation_matrix_json"]),
                 acceptance_criteria=json.loads(row["acceptance_criteria_json"]),
-                results_summary=json.loads(row["results_summary_json"]) if row["results_summary_json"] else None,
+                results_summary=json.loads(row["results_summary_json"])
+                if row["results_summary_json"]
+                else None,
                 promotion_decision=row["promotion_decision"],
                 rejection_reason=row["rejection_reason"],
                 representative_replays=json.loads(row["representative_replays_json"]),
@@ -384,7 +488,9 @@ class Database:
                     completed_at=row["completed_at"],
                     evaluation_matrix=json.loads(row["evaluation_matrix_json"]),
                     acceptance_criteria=json.loads(row["acceptance_criteria_json"]),
-                    results_summary=json.loads(row["results_summary_json"]) if row["results_summary_json"] else None,
+                    results_summary=json.loads(row["results_summary_json"])
+                    if row["results_summary_json"]
+                    else None,
                     promotion_decision=row["promotion_decision"],
                     rejection_reason=row["rejection_reason"],
                     representative_replays=json.loads(row["representative_replays_json"]),
@@ -397,12 +503,14 @@ class Database:
     def save_promotion(
         self,
         promotion_id: str,
-        experiment_id: str,
+        experiment_id: str | None,
         artifact_id: str,
         promoted_at: str,
         manifest_snapshot: dict[str, Any],
         reason: str = "",
-        mode: str = "MANUAL",
+        mode: str = "MANUAL_VERIFIED",
+        promoted_by: str = "system",
+        override_acknowledgement: str | None = None,
     ) -> None:
         with self.connect() as conn:
             with conn:
@@ -410,17 +518,19 @@ class Database:
                     """
                     INSERT INTO promotions (
                         promotion_id, experiment_id, artifact_id, promoted_at,
-                        mode, manifest_snapshot_json, reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        promoted_by, mode, manifest_snapshot_json, reason, override_acknowledgement
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         promotion_id,
                         experiment_id,
                         artifact_id,
                         promoted_at,
+                        promoted_by,
                         mode,
                         json.dumps(manifest_snapshot),
                         reason,
+                        override_acknowledgement,
                     ),
                 )
 
@@ -437,6 +547,9 @@ class Database:
                     "mode": r["mode"],
                     "manifest_snapshot": json.loads(r["manifest_snapshot_json"]),
                     "reason": r["reason"],
+                    "override_acknowledgement": r["override_acknowledgement"]
+                    if "override_acknowledgement" in r.keys()
+                    else None,
                 }
                 for r in rows
             ]

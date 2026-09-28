@@ -11,7 +11,7 @@ def wilson_score_interval(
     successes: int, total: int, confidence: float = 0.95
 ) -> tuple[float, float]:
     """Compute the Wilson score confidence interval for a binomial proportion.
-    
+
     Returns (lower_bound, upper_bound) in range [0.0, 1.0].
     """
     if total <= 0:
@@ -29,9 +29,7 @@ def wilson_score_interval(
     z2 = z * z
     denominator = 1.0 + z2 / total
     centre_adjusted_probability = p_hat + z2 / (2.0 * total)
-    adjusted_standard_deviation = math.sqrt(
-        (p_hat * (1.0 - p_hat) + z2 / (4.0 * total)) / total
-    )
+    adjusted_standard_deviation = math.sqrt((p_hat * (1.0 - p_hat) + z2 / (4.0 * total)) / total)
 
     lower = (centre_adjusted_probability - z * adjusted_standard_deviation) / denominator
     upper = (centre_adjusted_probability + z * adjusted_standard_deviation) / denominator
@@ -46,7 +44,7 @@ def paired_bootstrap_difference(
     seed: int = 42,
 ) -> tuple[float, float, float]:
     """Compute paired bootstrap difference mean and confidence interval.
-    
+
     Returns (mean_diff, ci_lower, ci_upper).
     """
     n = len(diffs)

@@ -6,7 +6,8 @@ import time
 import uuid
 from typing import Any
 
-from battlelab.core.hashing import hash_dict, hash_bytes
+from battlelab.core.hashing import hash_bytes, hash_dict
+
 
 def generate_match_id(normalized_spec: dict[str, Any]) -> str:
     """Generate a deterministic match ID from canonical MatchSpec fields."""
@@ -23,17 +24,20 @@ def generate_match_id(normalized_spec: dict[str, Any]) -> str:
     digest = hash_dict(spec_copy)
     return f"m_{digest[:16]}"
 
+
 def generate_artifact_id(source_hash: str, build_config_hash: str = "") -> str:
     """Generate a stable bot artifact ID based on its content hashes."""
     combined = f"{source_hash}:{build_config_hash}"
     digest = hash_bytes(combined.encode("utf-8"))
     return f"art_{digest[:16]}"
 
+
 def generate_experiment_id(prefix: str = "exp") -> str:
     """Generate a unique experiment ID with timestamp and entropy."""
     ts = int(time.time())
     rand_part = uuid.uuid4().hex[:8]
     return f"{prefix}_{ts}_{rand_part}"
+
 
 def generate_tournament_id(prefix: str = "trn") -> str:
     """Generate a unique tournament ID with timestamp and entropy."""

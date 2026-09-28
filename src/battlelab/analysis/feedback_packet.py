@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
 from battlelab.core.models import Experiment
 
 
@@ -36,7 +36,9 @@ def generate_feedback_packet(
         "regression_candidates": paired.get("worst_regressions", []),
         "ai_actionable_insights": {
             "can_promote": gate_results.get("passed", False),
-            "primary_blocking_issue": gate_results.get("violations", [None])[0] if not gate_results.get("passed") else None,
+            "primary_blocking_issue": gate_results.get("violations", [None])[0]
+            if not gate_results.get("passed")
+            else None,
             "suggested_focus_area": "Fix invalid actions or crashes"
             if agg.get("crash_count", 0) > 0 or agg.get("invalid_action_count", 0) > 0
             else "Optimize opening claims on sparse maps"

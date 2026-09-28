@@ -1,13 +1,16 @@
 """Integration tests for experiment lifecycle, evaluation, promotion gates, and rollback."""
 
 from pathlib import Path
+
 import pytest
+
 from battlelab.bots.registry import BotRegistry
 from battlelab.core.errors import PromotionGateError
 from battlelab.experiments.evaluator import ExperimentEvaluator
 from battlelab.experiments.promotion import PromotionGate
 from battlelab.experiments.registry import ExperimentRegistry
 from battlelab.storage.database import Database
+
 
 def test_experiment_eval_and_promotion(tmp_path: Path):
     db_file = tmp_path / "exp_test.db"
@@ -75,6 +78,7 @@ def test_experiment_eval_and_promotion(tmp_path: Path):
     assert champ_after is not None
     assert champ_after.artifact_id == baseline.artifact_id
 
+
 def test_promotion_rejection_on_failure(tmp_path: Path):
     db_file = tmp_path / "exp_fail_test.db"
     db = Database(db_file)
@@ -106,7 +110,7 @@ def test_promotion_rejection_on_failure(tmp_path: Path):
     gate = PromotionGate(db)
     with pytest.raises(PromotionGateError) as exc_info:
         gate.promote(exp.experiment_id, dry_run=False, force=False)
-    
+
     assert len(exc_info.value.violations) > 0
     # Confirm champion did NOT become the buggy challenger
     champ = registry.get_champion_artifact()

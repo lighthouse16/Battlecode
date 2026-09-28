@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
 def get_project_root() -> Path:
     """Return the absolute path to the project root."""
     return Path(__file__).resolve().parent.parent.parent.parent
+
 
 def get_data_dir() -> Path:
     data_env = os.environ.get("BATTLELAB_DATA_DIR")
@@ -18,10 +20,12 @@ def get_data_dir() -> Path:
         return p
     return get_project_root() / "data"
 
+
 def get_artifacts_dir() -> Path:
     p = get_data_dir() / "artifacts"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
 
 def get_replays_dir() -> Path:
     replays_env = os.environ.get("BATTLELAB_REPLAY_DIR")
@@ -34,15 +38,18 @@ def get_replays_dir() -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+
 def get_reports_dir() -> Path:
     p = get_data_dir() / "reports"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+
 def get_manifests_dir() -> Path:
     p = get_data_dir() / "manifests"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
 
 def get_database_path() -> Path:
     db_env = os.environ.get("BATTLELAB_DATABASE_PATH")
@@ -55,6 +62,7 @@ def get_database_path() -> Path:
     db_path = get_data_dir() / "battlelab.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return db_path
+
 
 def get_champion_manifest_path() -> Path:
     manifest_env = os.environ.get("BATTLELAB_CHAMPION_MANIFEST")

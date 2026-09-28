@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
-from battlelab.core.errors import ConfigurationError
 
 
 def validate_evaluation_config(config: dict[str, Any]) -> list[str]:
@@ -39,8 +39,9 @@ def validate_promotion_config(config: dict[str, Any]) -> list[str]:
 
 def validate_all_configs(configs_dir: Path | str) -> dict[str, list[str]]:
     """Validate all standard configuration files in configs/."""
-    from battlelab.config.loader import load_yaml_config
     from pathlib import Path
+
+    from battlelab.config.loader import load_yaml_config
 
     dir_path = Path(configs_dir)
     results = {}

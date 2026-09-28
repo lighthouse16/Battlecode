@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-from battlelab.core.hashing import hash_directory, hash_file, hash_dict
+from battlelab.core.hashing import hash_dict, hash_directory, hash_file
 from battlelab.core.identifiers import generate_artifact_id
 from battlelab.core.models import BotArtifact
 from battlelab.storage.paths import get_artifacts_dir

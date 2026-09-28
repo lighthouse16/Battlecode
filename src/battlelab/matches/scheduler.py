@@ -1,24 +1,33 @@
-"""Parallel, resumable tournament scheduler."""
+"""Parallel, safe, and resumable tournament scheduler with atomic SQLite job-leasing."""
 
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from battlelab.core.hashing import hash_dict
-from battlelab.core.models import MatchOutcome, MatchResult, MatchSpec
+from battlelab.core.models import MatchSpec
 from battlelab.matches.worker import execute_match_job
 from battlelab.storage.database import Database
 
 
 class TournamentScheduler:
-    """Manages parallel tournament execution with resume support and duplicate prevention."""
+    """Manages tournament execution with atomic SQLite leases, crash recovery, and multi-scheduler safety."""
 
-    def __init__(self, db: Database | None = None, max_workers: int = 4) -> None:
+    def __init__(
+        self,
+        db: Database | None = None,
+        max_workers: int = 4,
+        lease_duration_seconds: float = 30.0,
+    ) -> None:
         self.db = db or Database()
         self.max_workers = max_workers
+        self.lease_duration_seconds = lease_duration_seconds
+        self.scheduler_id = f"sched_{uuid.uuid4().hex[:8]}"
 
     def create_tournament(
         self,
@@ -32,7 +41,6 @@ class TournamentScheduler:
         conf_hash = hash_dict(conf)
         created_at = datetime.now(timezone.utc).isoformat()
 
-        # Save tournament record
         self.db.save_tournament(
             tournament_id=tournament_id,
             name=name,
@@ -41,7 +49,6 @@ class TournamentScheduler:
             config=conf,
         )
 
-        # Save all match specs
         for spec in specs:
             spec.tournament_id = tournament_id
             self.db.save_match_spec(spec, created_at)
@@ -54,62 +61,71 @@ class TournamentScheduler:
         on_match_complete: Callable[[dict[str, Any]], None] | None = None,
         stop_after: int | None = None,
     ) -> dict[str, Any]:
-        """Execute or resume tournament matches in parallel."""
+        """Execute or resume tournament matches using atomic job leases."""
         trn = self.db.get_tournament(tournament_id)
         if not trn:
             raise ValueError(f"Tournament not found: {tournament_id}")
 
         self.db.update_tournament_status(tournament_id, "RUNNING")
+        db_path_str = str(self.db.db_path)
+
+        completed_in_session = 0
+        leased_in_session = 0
+        stop_requested = False
+        session_lock = threading.Lock()
+
+        def _worker_loop(worker_num: int):
+            nonlocal completed_in_session, leased_in_session, stop_requested
+            worker_id = f"{self.scheduler_id}_w{worker_num}"
+            while True:
+                with session_lock:
+                    if stop_requested:
+                        break
+                    if stop_after is not None and leased_in_session >= stop_after:
+                        break
+                    job = self.db.lease_next_match(
+                        tournament_id=tournament_id,
+                        worker_id=worker_id,
+                        lease_duration_seconds=self.lease_duration_seconds,
+                    )
+                    if job:
+                        leased_in_session += 1
+                if not job:
+                    # No pending or recoverable jobs
+                    break
+
+                # Execute claimed match job
+                spec_dict = json.loads(job["spec_json"])
+                res = execute_match_job(spec_dict, db_path_str)
+                with session_lock:
+                    completed_in_session += 1
+
+                if on_match_complete:
+                    on_match_complete(res)
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [executor.submit(_worker_loop, i) for i in range(self.max_workers)]
+                for f in futures:
+                    f.result()
+        except (KeyboardInterrupt, SystemExit):
+            self.db.update_tournament_status(tournament_id, "INTERRUPTED")
+            raise
+
         all_matches = self.db.list_matches_by_tournament(tournament_id)
-
-        # Identify pending matches
-        pending_matches = [m for m in all_matches if m.get("status") != "COMPLETED"]
-
-        if stop_after is not None and stop_after > 0:
-            pending_to_run = pending_matches[:stop_after]
-        else:
-            pending_to_run = pending_matches
-
-        completed_count = len(all_matches) - len(pending_matches)
-        interrupted = False
-
-        if pending_to_run:
-            db_path_str = str(self.db.db_path)
-            try:
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    future_to_spec = {
-                        executor.submit(
-                            execute_match_job,
-                            json.loads(m["spec_json"]),
-                            db_path_str,
-                        ): m["match_id"]
-                        for m in pending_to_run
-                    }
-
-                    for future in as_completed(future_to_spec):
-                        match_id = future_to_spec[future]
-                        res_dict = future.result()
-                        completed_count += 1
-                        if on_match_complete:
-                            on_match_complete(res_dict)
-
-            except (KeyboardInterrupt, SystemExit):
-                interrupted = True
-                self.db.update_tournament_status(tournament_id, "INTERRUPTED")
-                raise
-
-        # Check final status
-        remaining = self.db.list_matches_by_tournament(tournament_id)
-        still_pending = any(m.get("status") != "COMPLETED" for m in remaining)
+        pending_matches = [
+            m for m in all_matches if m.get("status") in ("PENDING", "RUNNING", "RETRYABLE_FAILURE")
+        ]
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        if still_pending:
-            self.db.update_tournament_status(tournament_id, "INTERRUPTED")
+        if pending_matches:
             final_status = "INTERRUPTED"
+            self.db.update_tournament_status(tournament_id, "INTERRUPTED")
         else:
-            self.db.update_tournament_status(tournament_id, "COMPLETED", completed_at=now_iso)
             final_status = "COMPLETED"
+            self.db.update_tournament_status(tournament_id, "COMPLETED", completed_at=now_iso)
 
+        completed_count = sum(1 for m in all_matches if m.get("status") == "COMPLETED")
         return {
             "tournament_id": tournament_id,
             "status": final_status,

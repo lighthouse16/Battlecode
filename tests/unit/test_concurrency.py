@@ -2,8 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
 from battlelab.core.models import BotArtifact
 from battlelab.storage.database import Database
+
 
 def test_sqlite_concurrent_writes(tmp_path: Path):
     db_file = tmp_path / "concurrent.db"

@@ -58,9 +58,7 @@ class ReplayStore:
                         meta = obj
                     frames_count += 1
                 except Exception as e:
-                    raise ReplayCorruptedError(
-                        f"Replay syntax error at line {line_no}: {e}"
-                    ) from e
+                    raise ReplayCorruptedError(f"Replay syntax error at line {line_no}: {e}") from e
 
         if frames_count == 0:
             raise ReplayCorruptedError("Replay contains zero frames")

@@ -1,14 +1,16 @@
 """Unit tests for storage, migrations, and database operations."""
 
 from pathlib import Path
+
 from battlelab.core.models import (
     BotArtifact,
+    Experiment,
     MatchOutcome,
     MatchResult,
     MatchSpec,
-    Experiment,
 )
 from battlelab.storage.database import Database
+
 
 def test_database_crud(tmp_path: Path):
     db_file = tmp_path / "test.db"
@@ -83,6 +85,7 @@ def test_database_crud(tmp_path: Path):
     )
     db.update_match_result(res)
     m_updated = db.get_match("m_100")
+    assert m_updated is not None
     assert m_updated["status"] == "COMPLETED"
     assert m_updated["outcome"] == "WIN_A"
     assert m_updated["score_a"] == 100.0
