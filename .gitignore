@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging & Distribution
+build/
+dist/
+*.egg-info/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Data & Replays & DB
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+data/replays/*.jsonl
+data/processed/*
+data/reports/*
+data/artifacts/*
+data/runs/*
+data/scratch/*
+!data/manifests/.gitkeep
+!data/processed/.gitkeep
+!data/reports/.gitkeep
+!data/replays/.gitkeep
+
+# Logs & Temp
+*.log
+logs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# OS artifacts
+.DS_Store
+Thumbs.db

@@ -1,0 +1,98 @@
+"""Markdown report generator for experiments."""
+
+from __future__ import annotations
+
+from typing import Any
+from battlelab.core.models import Experiment
+
+
+def generate_experiment_report(
+    exp: Experiment,
+    metrics: dict[str, Any],
+    gate_results: dict[str, Any] | None = None,
+) -> str:
+    """Generate human-readable report.md for an experiment."""
+    agg = metrics.get("aggregate", {})
+    paired = metrics.get("paired_analysis", {})
+    worst_reg = paired.get("worst_regressions", [])
+
+    win_rate = agg.get("win_rate", 0.0) * 100
+    ci = agg.get("wilson_ci_95", [0.0, 0.0])
+    ci_pct = [round(c * 100, 1) for c in ci]
+    
+    passed_gates = gate_results.get("passed", False) if gate_results else False
+    violations = gate_results.get("violations", []) if gate_results else []
+
+    lines = [
+        f"# Experiment Evaluation Report: {exp.experiment_id}",
+        "",
+        "## 1. Executive Summary",
+        f"- **Hypothesis**: {exp.hypothesis}",
+        f"- **Intended Change**: {exp.intended_change}",
+        f"- **Status**: {exp.status}",
+        f"- **Decision**: {exp.promotion_decision}",
+        f"- **Main Outcome**: Win Rate {win_rate:.1f}% (95% CI: [{ci_pct[0]}%, {ci_pct[1]}%])",
+        "",
+        "## 2. Artifact Provenance",
+        f"- **Challenger Artifact**: `{exp.challenger_artifact_id}`",
+        f"- **Baseline Artifact**: `{exp.baseline_artifact_id}`",
+        f"- **Representative Replays**: {', '.join(f'`{r}`' for r in exp.representative_replays) if exp.representative_replays else 'None'}",
+        "",
+        "## 3. Aggregate Performance",
+        f"- **Total Matches**: {agg.get('total_matches', 0)}",
+        f"- **Record (W / D / L)**: {agg.get('wins', 0)} / {agg.get('draws', 0)} / {agg.get('losses', 0)}",
+        f"- **Mean Score Difference**: {paired.get('mean_score_diff', 0.0):+.2f}",
+        f"- **Paired Bootstrap CI (95%)**: {paired.get('paired_bootstrap_ci_95', [0.0, 0.0])}",
+        "",
+        "## 4. Reliability & Runtime",
+        f"- **Crashes**: {agg.get('crash_count', 0)} (Rate: {agg.get('crash_rate', 0.0) * 100:.1f}%)",
+        f"- **Timeouts**: {agg.get('timeout_count', 0)} (Rate: {agg.get('timeout_rate', 0.0) * 100:.1f}%)",
+        f"- **Invalid Actions**: {agg.get('invalid_action_count', 0)}",
+        f"- **Missing Replays**: {agg.get('missing_replays', 0)}",
+        f"- **Runtime Percentiles (ms)**: p50={agg.get('runtime_percentiles_ms', {}).get('p50', 0)}, "
+        f"p90={agg.get('runtime_percentiles_ms', {}).get('p90', 0)}, "
+        f"p99={agg.get('runtime_percentiles_ms', {}).get('p99', 0)}",
+        "",
+        "## 5. Segment Breakdown",
+        "### By Map",
+    ]
+
+    for map_name, stats in agg.get("by_map", {}).items():
+        lines.append(f"- **{map_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L ({stats.get('total', 0)} matches)")
+
+    lines.extend([
+        "",
+        "### By Side",
+    ])
+    for side_name, stats in agg.get("by_side", {}).items():
+        lines.append(f"- **{side_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L")
+
+    lines.extend([
+        "",
+        "## 6. Worst Regressions",
+    ])
+    if worst_reg:
+        for reg in worst_reg:
+            lines.append(f"- Match `{reg['match_id']}` on `{reg['map']}` (seed {reg['seed']}): Deficit {reg['deficit']:.1f}")
+    else:
+        lines.append("No regressions observed against baseline.")
+
+    lines.extend([
+        "",
+        "## 7. Promotion Gates & Decision",
+        f"- **Promotion Passed**: {'YES' if passed_gates else 'NO'}",
+    ])
+    if violations:
+        lines.append("### Gate Violations:")
+        for v in violations:
+            lines.append(f"- [FAIL] {v}")
+    elif passed_gates:
+        lines.append("All promotion criteria satisfied.")
+
+    lines.extend([
+        "",
+        "## 8. Recommended Next Experiment",
+        "Investigate worst regression matchups or test broader opponent pool diversity.",
+    ])
+
+    return "\n".join(lines)

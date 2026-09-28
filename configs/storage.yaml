@@ -1,0 +1,11 @@
+# Storage and retention policies
+database_path: data/battlelab.db
+replay_directory: data/replays
+reports_directory: data/reports
+
+retention_policy:
+  retain_crashes: true
+  retain_timeouts: true
+  retain_invalid_actions: true
+  retain_losses: true
+  routine_win_sample_rate: 1.0  # 1.0 = retain all during experiments

@@ -1,0 +1,20 @@
+# Default evaluation matrix configuration
+adapter: mock
+time_limit_ms: 5000
+memory_limit_mb: 512
+max_workers: 4
+paired_sides: true
+repetitions: 1
+
+maps:
+  - grid_tiny_4x4
+  - grid_classic_8x8
+  - grid_sparse_12x12
+
+seeds:
+  - 42
+  - 137
+  - 2026
+
+confidence_level: 0.95
+min_sample_size: 6

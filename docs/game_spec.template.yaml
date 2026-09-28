@@ -1,0 +1,83 @@
+# Template for versioned game_spec.yaml (Instantiated upon official rules ingestion)
+game_name: "Battlecode Autumn Competition"
+spec_version: "1.0.0"
+ingestion_date: ""
+official_doc_hash: ""
+
+rules:
+  victory_conditions:
+    meaning: "Explicit primary and tie-break victory rules"
+    source_ref: "Rulebook Section 1.2"
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Adapter MatchResult outcome resolution"
+    test_coverage: ""
+
+  turn_structure:
+    meaning: "Turn ordering and resolution sequence"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Engine step loop"
+    test_coverage: ""
+
+  observation_model:
+    meaning: "Visibility, fog of war, and sensor ranges"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Bot state dictionary"
+    test_coverage: ""
+
+  legal_actions:
+    meaning: "Enumeration of valid action types"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Action validation schema"
+    test_coverage: ""
+
+  units_and_entities:
+    meaning: "Entity types, health, attack, costs"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Entity models"
+    test_coverage: ""
+
+  resources_and_economy:
+    meaning: "Resource generation, mining, currency"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Economic heuristics"
+    test_coverage: ""
+
+  movement_and_collision:
+    meaning: "Tile occupancy, collisions, terrain costs"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Pathfinder module"
+    test_coverage: ""
+
+  combat_mechanics:
+    meaning: "Damage application, weapon types, range"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Tactical module"
+    test_coverage: ""
+
+  compute_and_memory_limits:
+    meaning: "Per-turn time limit and bytecode/memory caps"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Process runner timeout configuration"
+    test_coverage: ""
+
+  local_engine_commands:
+    meaning: "CLI commands to execute match locally"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Adapter subprocess invocation"
+    test_coverage: ""
+
+  submission_commands:
+    meaning: "CLI commands or API endpoint for ladder submission"
+    source_ref: ""
+    verification_state: "UNVERIFIED"
+    implementation_impact: "Adapter submit_artifact method"
+    test_coverage: ""

@@ -1,0 +1,23 @@
+# Opponent pool definition
+# NOTE: Infrastructure fixtures only, not strategic assumptions about future competition.
+opponents:
+  - id: baseline_fixed
+    name: Fixed Deterministic Baseline
+    policy: fixed
+    tags: ["baseline", "policy:fixed"]
+  - id: baseline_random
+    name: Random Pseudo-Random Baseline
+    policy: random
+    tags: ["baseline", "policy:random"]
+  - id: baseline_resource
+    name: Resource Greedy Proxy
+    policy: resource
+    tags: ["baseline", "policy:resource"]
+  - id: baseline_aggressive
+    name: Aggressive Proxy
+    policy: aggressive
+    tags: ["baseline", "policy:aggressive"]
+  - id: baseline_defensive
+    name: Defensive Proxy
+    policy: defensive
+    tags: ["baseline", "policy:defensive"]
