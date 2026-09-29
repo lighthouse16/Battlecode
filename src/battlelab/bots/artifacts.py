@@ -93,14 +93,21 @@ def compute_artifact_manifest(
                 )
             entrypoint_rel = found
 
-        for root, dirs, filenames in os.walk(src):
+        if src.is_symlink():
+            raise ValueError(f"Symlinks are not permitted as bot source: {src}")
+
+        for root, dirs, filenames in os.walk(src, followlinks=False):
+            for d in list(dirs):
+                dpath = Path(root) / d
+                if dpath.is_symlink():
+                    raise ValueError(f"Symlinks are not permitted in bot source: {dpath}")
             dirs[:] = [d for d in dirs if d != "__pycache__" and not d.startswith(".")]
             for fname in filenames:
-                if fname.endswith(".pyc") or fname.startswith("."):
-                    continue
                 fpath = Path(root) / fname
                 if fpath.is_symlink():
                     raise ValueError(f"Symlinks are not permitted in bot source: {fpath}")
+                if fname.endswith(".pyc") or fname.startswith("."):
+                    continue
                 rel = fpath.relative_to(src).as_posix()
                 files[rel] = {
                     "sha256": hash_file(fpath),
@@ -120,140 +127,196 @@ def verify_artifact_integrity(bot: BotArtifact | Path | str) -> tuple[bool, str]
     """Verify complete snapshot integrity against stored manifest and canonical hash.
 
     Rejects modified, added, deleted, renamed, symlinked, or path-traversal files,
-    as well as forged manifest.json metadata.
+    hidden entries, bytecode, directory symlinks, and forged manifest.json metadata.
     """
-    if isinstance(bot, BotArtifact):
-        target_dir = Path(bot.source_location)
-        expected_manifest_hash = bot.manifest_hash
-        expected_entrypoint = bot.entrypoint_relpath
-    else:
-        target_dir = Path(bot)
-        expected_manifest_hash = None
-        expected_entrypoint = None
-
-    if not target_dir.exists():
-        return False, f"Artifact snapshot directory does not exist: {target_dir}"
-
-    manifest_file = target_dir / "manifest.json"
-    if not manifest_file.exists():
-        return False, f"Missing manifest.json in artifact snapshot: {target_dir}"
-
     try:
-        with open(manifest_file, "r", encoding="utf-8") as f:
-            manifest_data = json.load(f)
-    except Exception as e:
-        return False, f"Failed reading manifest.json: {e}"
+        if isinstance(bot, BotArtifact):
+            target_dir = Path(bot.source_location)
+            expected_manifest_hash = bot.manifest_hash
+            expected_entrypoint = bot.entrypoint_relpath
+        else:
+            target_dir = Path(bot)
+            expected_manifest_hash = None
+            expected_entrypoint = None
 
-    # 1. Validate manifest schema and types
-    if not isinstance(manifest_data, dict):
-        return False, "Invalid manifest: root must be a JSON object"
+        if not target_dir.exists():
+            return False, f"Artifact snapshot directory does not exist: {target_dir}"
 
-    recorded_files = manifest_data.get("files")
-    recorded_entrypoint = manifest_data.get("entrypoint_relpath")
-    recorded_hash = manifest_data.get("manifest_hash")
+        manifest_file = target_dir / "manifest.json"
+        if not manifest_file.exists():
+            return False, f"Missing manifest.json in artifact snapshot: {target_dir}"
 
-    if not isinstance(recorded_files, dict):
-        return False, "Invalid manifest schema: 'files' must be an object"
-    if not isinstance(recorded_entrypoint, str) or not recorded_entrypoint:
-        return False, "Invalid manifest schema: 'entrypoint_relpath' must be a non-empty string"
-    if not isinstance(recorded_hash, str) or len(recorded_hash) != 64:
-        return False, "Invalid manifest schema: 'manifest_hash' must be a 64-char SHA256 string"
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+        except Exception as e:
+            return False, f"Failed reading manifest.json: {e}"
 
-    # 2. Path normalization, traversal, and symlink checks on recorded paths
-    seen_normalized: set[str] = set()
-    for rel_path, meta in recorded_files.items():
-        if not isinstance(meta, dict) or "sha256" not in meta or "size_bytes" not in meta:
-            return False, f"Invalid file metadata schema for '{rel_path}'"
+        # 1. Validate manifest root schema and types
+        if not isinstance(manifest_data, dict):
+            return False, "Invalid manifest: root must be a JSON object"
 
-        if Path(rel_path).is_absolute():
-            return False, f"Absolute path rejected in manifest: {rel_path}"
+        recorded_files = manifest_data.get("files")
+        recorded_entrypoint = manifest_data.get("entrypoint_relpath")
+        recorded_hash = manifest_data.get("manifest_hash")
 
-        norm = Path(rel_path).as_posix()
-        if norm != rel_path or norm.startswith("../") or "/../" in norm or norm == "..":
-            return False, f"Path traversal rejected in manifest: {rel_path}"
-
-        if norm in seen_normalized:
-            return False, f"Duplicate normalized path in manifest: {norm}"
-        seen_normalized.add(norm)
-
-        fpath = target_dir / norm
-        if fpath.is_symlink():
-            return False, f"Symlink rejected in artifact snapshot: {norm}"
-
-    # 3. Entrypoint checks
-    if Path(recorded_entrypoint).is_absolute():
-        return False, f"Absolute entrypoint rejected: {recorded_entrypoint}"
-    norm_ep = Path(recorded_entrypoint).as_posix()
-    if (
-        norm_ep != recorded_entrypoint
-        or norm_ep.startswith("../")
-        or "/../" in norm_ep
-        or norm_ep == ".."
-    ):
-        return False, f"Entrypoint traversal rejected: {recorded_entrypoint}"
-    if recorded_entrypoint not in recorded_files:
-        return False, f"Entrypoint '{recorded_entrypoint}' is not registered in manifest files"
-
-    entry_path = target_dir / recorded_entrypoint
-    if entry_path.is_symlink() or not entry_path.is_file():
-        return False, f"Recorded entrypoint is not a regular file: {recorded_entrypoint}"
-
-    # 4. Canonically recompute manifest hash from actual manifest content
-    recomputed_hash = recompute_manifest_hash(recorded_files, recorded_entrypoint)
-    if recomputed_hash != recorded_hash:
-        return (
-            False,
-            f"Manifest hash forgery detected: recorded {recorded_hash[:12]} does not match recomputed {recomputed_hash[:12]}",
-        )
-
-    # Compare against expected database hash if available
-    if expected_manifest_hash and recomputed_hash != expected_manifest_hash:
-        return (
-            False,
-            f"Manifest hash mismatch against database: expected {expected_manifest_hash[:12]}, got {recomputed_hash[:12]}",
-        )
-
-    if expected_entrypoint and recorded_entrypoint != expected_entrypoint:
-        return (
-            False,
-            f"Entrypoint mismatch against database: expected '{expected_entrypoint}', recorded '{recorded_entrypoint}'",
-        )
-
-    # 5. Verify all recorded files exist with exact size and SHA256
-    for rel_path, meta in recorded_files.items():
-        fpath = target_dir / rel_path
-        if not fpath.exists() or not fpath.is_file() or fpath.is_symlink():
-            return False, f"Missing or invalid regular file in artifact snapshot: {rel_path}"
-
-        expected_size = meta.get("size_bytes")
-        if fpath.stat().st_size != expected_size:
+        if not isinstance(recorded_files, dict):
+            return False, "Invalid manifest schema: 'files' must be an object"
+        if not isinstance(recorded_entrypoint, str) or not recorded_entrypoint.strip():
+            return False, "Invalid manifest schema: 'entrypoint_relpath' must be a non-empty string"
+        if (
+            not isinstance(recorded_hash, str)
+            or len(recorded_hash) != 64
+            or not all(c in "0123456789abcdefABCDEF" for c in recorded_hash)
+        ):
             return (
                 False,
-                f"Size mismatch for '{rel_path}': expected {expected_size}, got {fpath.stat().st_size}",
+                "Invalid manifest schema: 'manifest_hash' must be a 64-char SHA256 hex string",
             )
 
-        expected_sha = meta.get("sha256")
-        actual_sha = hash_file(fpath)
-        if actual_sha != expected_sha:
-            return (
-                False,
-                f"Hash mismatch for '{rel_path}': expected {expected_sha[:12]}, got {actual_sha[:12]}",
-            )
+        # 2. Path normalization, traversal, type checks, and symlink checks on recorded paths
+        seen_normalized: set[str] = set()
+        for rel_path, meta in recorded_files.items():
+            if not isinstance(rel_path, str) or not rel_path.strip():
+                return False, "Invalid manifest schema: file key must be a non-empty string"
+            if not isinstance(meta, dict):
+                return False, f"Invalid file metadata schema for '{rel_path}': must be an object"
 
-    # 6. Verify NO extra / extraneous files or symlinks exist in snapshot directory
-    for root, dirs, filenames in os.walk(target_dir):
-        dirs[:] = [d for d in dirs if d != "__pycache__" and not d.startswith(".")]
-        for fname in filenames:
-            if fname == "manifest.json" or fname.startswith("."):
-                continue
-            fpath = Path(root) / fname
+            # Check sha256 format
+            sha = meta.get("sha256")
+            if (
+                not isinstance(sha, str)
+                or len(sha) != 64
+                or not all(c in "0123456789abcdefABCDEF" for c in sha)
+            ):
+                return False, f"Invalid SHA-256 hash in metadata for '{rel_path}'"
+
+            # Check size_bytes format (exclude booleans!)
+            size = meta.get("size_bytes")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                return False, f"Invalid size_bytes in metadata for '{rel_path}'"
+
+            if (
+                Path(rel_path).is_absolute()
+                or rel_path.startswith("/")
+                or rel_path.startswith("\\")
+            ):
+                return False, f"Absolute path rejected in manifest: {rel_path}"
+
+            norm = Path(rel_path).as_posix()
+            if (
+                norm != rel_path
+                or norm.startswith("../")
+                or "/../" in norm
+                or norm == ".."
+                or norm.startswith("./")
+            ):
+                return False, f"Path traversal rejected in manifest: {rel_path}"
+
+            if norm in seen_normalized:
+                return False, f"Duplicate normalized path in manifest: {norm}"
+            seen_normalized.add(norm)
+
+            fpath = target_dir / norm
             if fpath.is_symlink():
-                return False, f"Symlink detected in artifact snapshot: {fpath}"
-            rel = fpath.relative_to(target_dir).as_posix()
-            if rel not in recorded_files:
-                return False, f"Extraneous file detected in artifact snapshot: {rel}"
+                return False, f"Symlink rejected in artifact snapshot: {norm}"
 
-    return True, "Integrity verified"
+        # 3. Entrypoint checks
+        if Path(recorded_entrypoint).is_absolute():
+            return False, f"Absolute entrypoint rejected: {recorded_entrypoint}"
+        norm_ep = Path(recorded_entrypoint).as_posix()
+        if (
+            norm_ep != recorded_entrypoint
+            or norm_ep.startswith("../")
+            or "/../" in norm_ep
+            or norm_ep == ".."
+            or norm_ep.startswith("./")
+        ):
+            return False, f"Entrypoint traversal rejected: {recorded_entrypoint}"
+        if recorded_entrypoint not in recorded_files:
+            return False, f"Entrypoint '{recorded_entrypoint}' is not registered in manifest files"
+
+        entry_path = target_dir / recorded_entrypoint
+        if entry_path.is_symlink() or not entry_path.is_file():
+            return False, f"Recorded entrypoint is not a regular file: {recorded_entrypoint}"
+
+        # 4. Canonically recompute manifest hash from actual manifest content
+        recomputed_hash = recompute_manifest_hash(recorded_files, recorded_entrypoint)
+        if recomputed_hash != recorded_hash:
+            return (
+                False,
+                f"Manifest hash forgery detected: recorded {recorded_hash[:12]} does not match recomputed {recomputed_hash[:12]}",
+            )
+
+        # Compare against expected database hash if available
+        if expected_manifest_hash and recomputed_hash != expected_manifest_hash:
+            return (
+                False,
+                f"Manifest hash mismatch against database: expected {expected_manifest_hash[:12]}, got {recomputed_hash[:12]}",
+            )
+
+        if expected_entrypoint and recorded_entrypoint != expected_entrypoint:
+            return (
+                False,
+                f"Entrypoint mismatch against database: expected '{expected_entrypoint}', recorded '{recorded_entrypoint}'",
+            )
+
+        # 5. Verify all recorded files exist with exact size and SHA256
+        for rel_path, meta in recorded_files.items():
+            fpath = target_dir / rel_path
+            if not fpath.exists() or not fpath.is_file() or fpath.is_symlink():
+                return False, f"Missing or invalid regular file in artifact snapshot: {rel_path}"
+
+            expected_size = meta["size_bytes"]
+            if fpath.stat().st_size != expected_size:
+                return (
+                    False,
+                    f"Size mismatch for '{rel_path}': expected {expected_size}, got {fpath.stat().st_size}",
+                )
+
+            expected_sha = meta["sha256"]
+            actual_sha = hash_file(fpath)
+            if actual_sha != expected_sha:
+                return (
+                    False,
+                    f"Hash mismatch for '{rel_path}': expected {expected_sha[:12]}, got {actual_sha[:12]}",
+                )
+
+        # 6. Verify NO extra / extraneous files, hidden entries, bytecode, or symlinks exist in snapshot directory
+        for root, dirs, filenames in os.walk(target_dir, followlinks=False):
+            # Check directories
+            for d in list(dirs):
+                dpath = Path(root) / d
+                rel_d = dpath.relative_to(target_dir).as_posix()
+                if dpath.is_symlink():
+                    return False, f"Symlink directory rejected in artifact snapshot: {rel_d}"
+                if d.startswith("."):
+                    return False, f"Hidden directory detected in artifact snapshot: {rel_d}"
+                if d == "__pycache__":
+                    return False, f"__pycache__ directory detected in artifact snapshot: {rel_d}"
+
+            for fname in filenames:
+                fpath = Path(root) / fname
+                rel_f = fpath.relative_to(target_dir).as_posix()
+                if fpath.is_symlink():
+                    return False, f"Symlink file rejected in artifact snapshot: {rel_f}"
+                if fname.startswith("."):
+                    return False, f"Hidden file detected in artifact snapshot: {rel_f}"
+                if fname.endswith(".pyc"):
+                    return False, f"Compiled bytecode detected in artifact snapshot: {rel_f}"
+
+                # Only manifest.json at the snapshot root is permitted
+                if rel_f == "manifest.json":
+                    if Path(root).resolve() != target_dir.resolve():
+                        return False, f"Extraneous manifest.json detected in subdirectory: {rel_f}"
+                    continue
+
+                if rel_f not in recorded_files:
+                    return False, f"Extraneous file detected in artifact snapshot: {rel_f}"
+
+        return True, "Integrity verified"
+    except Exception as e:
+        return False, f"Verification failed with exception: {e}"
 
 
 def create_bot_artifact(

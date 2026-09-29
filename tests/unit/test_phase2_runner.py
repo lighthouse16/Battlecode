@@ -5,8 +5,6 @@ import sys
 import time
 from pathlib import Path
 
-import psutil
-
 from battlelab.adapters import get_adapter
 from battlelab.bots.artifacts import create_bot_artifact
 from battlelab.bots.process_runner import (
@@ -116,13 +114,14 @@ while True:
     child_pid_line = proc.stdout.readline().strip()
     child_pid = int(child_pid_line)
 
-    assert psutil.pid_exists(proc.pid)
-    child_visible = psutil.pid_exists(child_pid)
+    assert proc.poll() is None
+    child_visible = is_process_active(child_pid)
 
     # Terminate process tree
     terminate_process_tree(proc, timeout_seconds=1.0)
     time.sleep(0.1)
 
+    assert proc.poll() is not None
     assert not is_process_active(proc.pid)
     if child_visible:
         assert not is_process_active(child_pid)

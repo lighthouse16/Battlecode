@@ -56,14 +56,30 @@ def generate_experiment_report(
         f"- **Timeouts**: {agg.get('timeout_count', 0)} (Rate: {agg.get('timeout_rate', 0.0) * 100:.1f}%)",
         f"- **Invalid Actions**: {agg.get('invalid_action_count', 0)}",
         f"- **Missing Replays**: {agg.get('missing_replays', 0)}",
-        f"- **Runtime Headroom**: {agg.get('runtime_headroom', 1.0):.1%}",
-        f"- **Runtime Percentiles (ms)**: p50={agg.get('runtime_percentiles_ms', {}).get('p50', 0)}, "
-        f"p90={agg.get('runtime_percentiles_ms', {}).get('p90', 0)}, "
-        f"p99={agg.get('runtime_percentiles_ms', {}).get('p99', 0)}",
-        "",
-        "## 5. Segment Breakdown",
-        "### By Map",
     ]
+    if agg.get("runtime_telemetry_complete"):
+        headroom = agg.get("runtime_headroom", 0.0)
+        p_dict = agg.get("runtime_percentiles_ms") or {}
+        lines.append(f"- **Runtime Headroom**: {headroom:.1%}")
+        lines.append(
+            f"- **Runtime Percentiles (ms)**: p50={p_dict.get('p50', 0)}, "
+            f"p90={p_dict.get('p90', 0)}, "
+            f"p99={p_dict.get('p99', 0)}"
+        )
+    else:
+        missing_cnt = agg.get("runtime_telemetry_missing_count", 0)
+        lines.append(
+            f"- **Runtime Headroom**: `UNAVAILABLE` (Incomplete telemetry: {missing_cnt} challenger match(es) missing per-turn measurements)"
+        )
+        lines.append("- **Runtime Percentiles (ms)**: `UNAVAILABLE`")
+
+    lines.extend(
+        [
+            "",
+            "## 5. Segment Breakdown",
+            "### By Map",
+        ]
+    )
 
     for map_name, stats in agg.get("by_map", {}).items():
         total_m = stats.get("valid_total", stats.get("total", 0))

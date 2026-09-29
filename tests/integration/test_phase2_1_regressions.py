@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import stat
 import subprocess
@@ -16,8 +17,14 @@ from battlelab.adapters import get_adapter
 from battlelab.analysis.metrics import (
     calculate_paired_experiment_metrics,
 )
-from battlelab.bots.artifacts import create_bot_artifact, verify_artifact_integrity
+from battlelab.analysis.report import generate_experiment_report
+from battlelab.bots.artifacts import (
+    compute_artifact_manifest,
+    create_bot_artifact,
+    verify_artifact_integrity,
+)
 from battlelab.bots.process_runner import (
+    BotSubprocess,
     check_memory_limit_support,
     is_process_active,
     terminate_process_tree,
@@ -59,13 +66,14 @@ while True:
     child_pid = int(child_pid_str)
     grandchild_pid = int(grandchild_pid_str)
 
-    assert is_process_active(parent.pid)
+    assert parent.poll() is None
     child_visible = is_process_active(child_pid)
     grandchild_visible = is_process_active(grandchild_pid)
 
     terminate_process_tree(parent, timeout_seconds=1.5)
     time.sleep(0.2)
 
+    assert parent.poll() is not None
     assert not is_process_active(parent.pid)
     if child_visible:
         assert not is_process_active(child_pid)
@@ -859,3 +867,375 @@ def test_26_pre_promotion_integrity_blocks_tampered_bot(tmp_path: Path):
     with pytest.raises(PromotionGateError) as exc_info:
         gate.promote(exp.experiment_id)
     assert any("integrity" in v.lower() for v in exc_info.value.violations)
+
+
+def test_27_symlink_directory_and_unmanifested_entries_rejected(tmp_path: Path):
+    """27. Snapshots reject symlink files, directory symlinks, hidden files/dirs, and unmanifested files."""
+    db = Database(tmp_path / "sym_test.db")
+    reg = BotRegistry(db)
+
+    bot_dir = tmp_path / "sample_bot"
+    bot_dir.mkdir()
+    (bot_dir / "bot.py").write_text("print('clean bot')\n", encoding="utf-8")
+
+    # Directory symlink check during compute_artifact_manifest
+    target_sub = tmp_path / "sub"
+    target_sub.mkdir()
+    sym_dir = bot_dir / "sym_dir"
+    try:
+        sym_dir.symlink_to(target_sub, target_is_directory=True)
+        with pytest.raises(ValueError, match="Symlinks are not permitted"):
+            compute_artifact_manifest(bot_dir)
+        sym_dir.unlink()
+    except (OSError, NotImplementedError):
+        # Platform/user privilege may restrict symlink creation on Windows
+        pass
+
+    # Register clean bot
+    art = reg.register_bot(bot_dir, "CleanBot")
+    art_path = Path(art.source_location)
+
+    # 1. Hidden file rejection
+    hidden_file = art_path / ".backdoor.py"
+    hidden_file.write_text("print('hidden')\n", encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "hidden" in err.lower()
+    hidden_file.unlink()
+
+    # 2. Hidden directory rejection
+    hidden_dir = art_path / ".secret"
+    hidden_dir.mkdir()
+    (hidden_dir / "nested.py").write_text("print('nested')\n", encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "hidden" in err.lower()
+    (hidden_dir / "nested.py").unlink()
+    hidden_dir.rmdir()
+
+    # 3. __pycache__ rejection
+    pycache_dir = art_path / "__pycache__"
+    pycache_dir.mkdir()
+    (pycache_dir / "evil.pyc").write_bytes(b"bytecode")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "__pycache__" in err.lower()
+    (pycache_dir / "evil.pyc").unlink()
+    pycache_dir.rmdir()
+
+    # 4. Unmanifested extraneous file rejection
+    extra = art_path / "extra.py"
+    extra.write_text("print('extra')\n", encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "extraneous" in err.lower()
+    extra.unlink()
+
+    # 5. Clean state passes integrity
+    ok, err = verify_artifact_integrity(art)
+    assert ok
+
+
+def test_28_manifest_type_safety_and_no_crash(tmp_path: Path):
+    """28. verify_artifact_integrity handles malformed types, invalid hashes, and bad JSON safely without crashing."""
+    db = Database(tmp_path / "manifest_types.db")
+    reg = BotRegistry(db)
+
+    bot_file = tmp_path / "types_bot.py"
+    bot_file.write_text("print('types bot')\n", encoding="utf-8")
+    art = reg.register_bot(bot_file, "TypesBot")
+    art_path = Path(art.source_location)
+    mfile = art_path / "manifest.json"
+    os.chmod(mfile, stat.S_IWRITE | stat.S_IREAD)
+
+    orig_manifest = json.loads(mfile.read_text(encoding="utf-8"))
+
+    # Case A: Corrupted JSON syntax
+    mfile.write_text("{invalid json", encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "manifest.json" in err.lower()
+
+    # Case B: Boolean size_bytes (JSON true becomes Python True)
+    bad_manifest = json.loads(json.dumps(orig_manifest))
+    bad_manifest["files"]["types_bot.py"]["size_bytes"] = True
+    mfile.write_text(json.dumps(bad_manifest), encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "size_bytes" in err.lower()
+
+    # Case C: Negative size_bytes
+    bad_manifest["files"]["types_bot.py"]["size_bytes"] = -1
+    mfile.write_text(json.dumps(bad_manifest), encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "size_bytes" in err.lower()
+
+    # Case D: Invalid SHA256 length / non-hex
+    bad_manifest["files"]["types_bot.py"]["size_bytes"] = orig_manifest["files"]["types_bot.py"][
+        "size_bytes"
+    ]
+    bad_manifest["files"]["types_bot.py"]["sha256"] = "short_hash"
+    mfile.write_text(json.dumps(bad_manifest), encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+    assert "sha-256" in err.lower() or "hash" in err.lower()
+
+    # Case E: Non-string file key
+    bad_manifest["files"] = {None: {"sha256": "a" * 64, "size_bytes": 10}}
+    mfile.write_text(json.dumps(bad_manifest), encoding="utf-8")
+    ok, err = verify_artifact_integrity(art)
+    assert not ok
+
+
+def test_29_bytecode_generation_disabled(tmp_path: Path):
+    """29. Bot subprocess execution must not emit .pyc files or __pycache__ directories."""
+    bot_code = tmp_path / "simple_turn_bot.py"
+    bot_code.write_text(
+        "import sys, json\n"
+        "for line in sys.stdin:\n"
+        "    if not line.strip(): continue\n"
+        "    print(json.dumps({'action': 'MOVE', 'turn': 1}), flush=True)\n",
+        encoding="utf-8",
+    )
+
+    runner = BotSubprocess(entrypoint_path=bot_code, cwd=tmp_path)
+    runner.start()
+    try:
+        action, _status = runner.send_turn({"turn": 1}, timeout_seconds=1.0)
+        assert action is not None
+        assert action.get("action") == "MOVE"
+    finally:
+        runner.stop()
+
+    # Verify no .pyc or __pycache__ in tmp_path
+    for _root, dirs, files in os.walk(tmp_path):
+        assert "__pycache__" not in dirs
+        for f in files:
+            assert not f.endswith(".pyc")
+
+
+def test_30_promotion_config_provenance_persisted_before_report(tmp_path: Path):
+    """30. Promotion config snapshot and 64-char hash are persisted to DB, report.md, and analysis_packet.json."""
+    db = Database(tmp_path / "provenance.db")
+    evaluator = ExperimentEvaluator(db=db)
+    b = evaluator.bot_registry.register_bot("bots/baselines/fixed_bot.py", "BaseFixed")
+    c = evaluator.bot_registry.register_bot("bots/baselines/random_bot.py", "ChalRand")
+
+    exp = evaluator.registry.create_experiment(
+        hypothesis="Provenance test",
+        baseline_artifact_id=b.artifact_id,
+        challenger_artifact_id=c.artifact_id,
+        intended_change="Check promotion config snapshot",
+    )
+
+    custom_prom_cfg = tmp_path / "custom_promotion.yaml"
+    custom_prom_cfg.write_text(
+        "min_sample_size: 4\nmin_win_rate: 0.50\nrequire_determinism_pass: false\nmin_segment_sample_size: 1\n",
+        encoding="utf-8",
+    )
+
+    evaluator.run_experiment(
+        exp.experiment_id,
+        promotion_config_path=custom_prom_cfg,
+    )
+
+    # 1. DB check
+    saved_exp = db.get_experiment(exp.experiment_id)
+    assert saved_exp is not None
+    assert saved_exp.status == "COMPLETED"
+    assert len(saved_exp.promotion_config_hash) == 64
+    assert saved_exp.promotion_config.get("min_sample_size") == 4
+
+    # 2. report.md check
+    from battlelab.storage.paths import get_reports_dir
+
+    actual_report_path = get_reports_dir() / exp.experiment_id / "report.md"
+    assert actual_report_path.exists()
+    report_content = actual_report_path.read_text(encoding="utf-8")
+    assert f"- **Promotion Config Hash**: `{saved_exp.promotion_config_hash}`" in report_content
+
+    # 3. analysis_packet.json check
+    packet_path = get_reports_dir() / exp.experiment_id / "analysis_packet.json"
+    assert packet_path.exists()
+    packet_data = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet_data["metadata"]["promotion_config_hash"] == saved_exp.promotion_config_hash
+
+
+def test_31_promotion_uses_stored_config_snapshot(tmp_path: Path):
+    """31. PromotionGate.promote uses experiment snapshot instead of newer modified disk config."""
+    db = Database(tmp_path / "snap_prom.db")
+    reg = BotRegistry(db)
+    exp_reg = ExperimentRegistry(db)
+
+    b = reg.register_bot("bots/baselines/fixed_bot.py", "BaseFixed")
+    c = reg.register_bot("bots/baselines/random_bot.py", "ChalRand")
+
+    exp = exp_reg.create_experiment(
+        hypothesis="Snapshot test",
+        baseline_artifact_id=b.artifact_id,
+        challenger_artifact_id=c.artifact_id,
+        intended_change="Snapshot promotion test",
+    )
+    exp.status = "COMPLETED"
+    exp.results_summary = {
+        "aggregate": {
+            "valid_matches": 10,
+            "win_rate": 0.60,
+            "runtime_headroom": 0.50,
+            "runtime_telemetry_complete": True,
+            "runtime_telemetry_missing_count": 0,
+        },
+        "paired_analysis": {
+            "completed_pairs": 5,
+            "mean_score_delta": 2.0,
+            "weighted_mean_win_delta": 0.15,
+            "score_delta_bootstrap_ci_95": [0.5, 4.0],
+            "win_delta_bootstrap_ci_95": [0.05, 0.30],
+        },
+    }
+    # Stored snapshot has min_win_rate 0.50 (passing)
+    exp.promotion_config = {
+        "min_sample_size": 4,
+        "min_win_rate": 0.50,
+        "require_determinism_pass": False,
+        "min_segment_sample_size": 1,
+    }
+    exp_reg.update_experiment(exp)
+
+    # Disk config has impossible min_win_rate 0.99
+    impossible_yaml = tmp_path / "impossible_promotion.yaml"
+    impossible_yaml.write_text("min_win_rate: 0.99\n", encoding="utf-8")
+
+    gate = PromotionGate(db, config_path=impossible_yaml)
+    res = gate.promote(exp.experiment_id)
+    assert res["status"] == "PROMOTED"
+
+
+def test_32_missing_and_insufficient_seed_segments_block_promotion(tmp_path: Path):
+    """32. Missing seeds or insufficient pairs across segments strictly fail promotion."""
+    db = Database(tmp_path / "segments.db")
+    gate = PromotionGate(db)
+
+    exp = Experiment(
+        experiment_id="exp_seg_check",
+        hypothesis="Check segment sample counts",
+        baseline_artifact_id="b",
+        challenger_artifact_id="c",
+        intended_change="Segments test",
+        evaluation_config={
+            "seeds": [42, 137, 999],
+            "maps": ["grid_classic_8x8"],
+            "paired_sides": True,
+        },
+    )
+    metrics = {
+        "aggregate": {
+            "valid_matches": 20,
+            "win_rate": 0.80,
+            "runtime_headroom": 0.50,
+            "runtime_telemetry_complete": True,
+        },
+        "paired_analysis": {
+            "completed_pairs": 10,
+            "mean_score_delta": 5.0,
+            "weighted_mean_win_delta": 0.30,
+            "score_delta_bootstrap_ci_95": [1.0, 9.0],
+            "win_delta_bootstrap_ci_95": [0.10, 0.50],
+            "by_seed": {
+                "42": {"pair_count": 1},
+                "137": {"pair_count": 9},
+            },
+        },
+    }
+
+    check = gate.check_criteria(
+        exp,
+        metrics,
+        config_override={"min_segment_sample_size": 2, "require_determinism_pass": False},
+    )
+    assert check["passed"] is False
+    assert check["segment_sample_counts"]["by_seed"]["999"] == 0
+    assert check["segment_sample_counts"]["by_seed"]["42"] == 1
+    # Check violations mention both missing seed 999 and insufficient seed 42
+    violation_texts = " ".join(check["violations"])
+    assert "999" in violation_texts and "0 pair" in violation_texts
+    assert "42" in violation_texts and "1 pair" in violation_texts
+
+
+def test_33_pure_per_turn_runtime_telemetry_enforced(tmp_path: Path):
+    """33. Matches without challenger turn telemetry fail closed without whole-match fallback."""
+    matches = [
+        {
+            "match_id": "m1",
+            "bot_a_id": "challenger",
+            "bot_b_id": "baseline",
+            "outcome": "PLAYER_A_WIN",
+            "score_a": 10.0,
+            "score_b": 5.0,
+            "duration_ms": 120.0,
+            "turn_count": 10,
+            "seed": 42,
+            "map_name": "grid_classic_8x8",
+            "bot_a_turn_durations_ms": [],
+            "bot_b_turn_durations_ms": [5.0, 6.0],
+        }
+    ]
+
+    metrics = calculate_paired_experiment_metrics(
+        matches=matches,
+        challenger_id="challenger",
+        baseline_id="baseline",
+    )
+
+    agg = metrics["aggregate"]
+    assert agg["runtime_telemetry_complete"] is False
+    assert agg["runtime_headroom"] is None
+    assert agg["runtime_percentiles_ms"] is None
+    assert agg["runtime_telemetry_missing_count"] == 1
+
+    # Promotion check fails closed
+    gate = PromotionGate()
+    exp = Experiment(
+        experiment_id="exp_telem",
+        hypothesis="Telemetry test",
+        baseline_artifact_id="baseline",
+        challenger_artifact_id="challenger",
+        intended_change="Check telemetry",
+    )
+    check = gate.check_criteria(
+        exp,
+        metrics,
+        config_override={"min_runtime_headroom": 0.10, "require_determinism_pass": False},
+    )
+    assert check["passed"] is False
+    assert any("Runtime telemetry incomplete" in v for v in check["violations"])
+
+    # Report outputs UNAVAILABLE
+    report = generate_experiment_report(exp, metrics, check)
+    assert "Runtime Headroom**: `UNAVAILABLE`" in report
+
+
+def test_34_pid_namespace_portability_and_concurrency_isolation():
+    """34. terminate_process_tree isolates target process without killing concurrent unrelated processes."""
+    target_code = "import time; time.sleep(60)\n"
+    target = subprocess.Popen([sys.executable, "-c", target_code])
+    unrelated = subprocess.Popen([sys.executable, "-c", target_code])
+
+    try:
+        assert target.poll() is None
+        assert unrelated.poll() is None
+
+        # Terminate only target
+        terminate_process_tree(target, timeout_seconds=1.0)
+        time.sleep(0.1)
+
+        # Target is dead
+        assert target.poll() is not None
+        assert not is_process_active(target.pid)
+
+        # Unrelated process is still alive and running
+        assert unrelated.poll() is None
+        assert is_process_active(unrelated.pid)
+    finally:
+        terminate_process_tree(unrelated, timeout_seconds=1.0)

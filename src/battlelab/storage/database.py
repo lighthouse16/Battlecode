@@ -532,8 +532,8 @@ class Database:
                         representative_replays_json,
                         evaluation_config_json, evaluation_config_hash,
                         opponent_pool_config_json, opponent_pool_config_hash,
-                        promotion_config_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        promotion_config_json, promotion_config_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(experiment_id) DO UPDATE SET
                         status=excluded.status,
                         completed_at=excluded.completed_at,
@@ -545,6 +545,7 @@ class Database:
                         evaluation_config_hash=excluded.evaluation_config_hash,
                         opponent_pool_config_json=excluded.opponent_pool_config_json,
                         opponent_pool_config_hash=excluded.opponent_pool_config_hash,
+                        promotion_config_json=excluded.promotion_config_json,
                         promotion_config_hash=excluded.promotion_config_hash
                     """,
                     (
@@ -566,6 +567,7 @@ class Database:
                         exp.evaluation_config_hash,
                         json.dumps(exp.opponent_pool_config),
                         exp.opponent_pool_config_hash,
+                        json.dumps(exp.promotion_config),
                         exp.promotion_config_hash,
                     ),
                 )
@@ -607,6 +609,9 @@ class Database:
                 opponent_pool_config_hash=row["opponent_pool_config_hash"]
                 if "opponent_pool_config_hash" in keys and row["opponent_pool_config_hash"]
                 else "",
+                promotion_config=json.loads(row["promotion_config_json"])
+                if "promotion_config_json" in keys and row["promotion_config_json"]
+                else {},
                 promotion_config_hash=row["promotion_config_hash"]
                 if "promotion_config_hash" in keys and row["promotion_config_hash"]
                 else "",
@@ -648,6 +653,9 @@ class Database:
                         opponent_pool_config_hash=row["opponent_pool_config_hash"]
                         if "opponent_pool_config_hash" in keys and row["opponent_pool_config_hash"]
                         else "",
+                        promotion_config=json.loads(row["promotion_config_json"])
+                        if "promotion_config_json" in keys and row["promotion_config_json"]
+                        else {},
                         promotion_config_hash=row["promotion_config_hash"]
                         if "promotion_config_hash" in keys and row["promotion_config_hash"]
                         else "",

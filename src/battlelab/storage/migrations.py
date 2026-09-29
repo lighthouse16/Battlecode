@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     evaluation_config_hash TEXT NOT NULL DEFAULT '',
     opponent_pool_config_json TEXT NOT NULL DEFAULT '{}',
     opponent_pool_config_hash TEXT NOT NULL DEFAULT '',
+    promotion_config_json TEXT NOT NULL DEFAULT '{}',
     promotion_config_hash TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(baseline_artifact_id) REFERENCES artifacts(artifact_id),
     FOREIGN KEY(challenger_artifact_id) REFERENCES artifacts(artifact_id)
@@ -239,6 +240,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             ("evaluation_config_hash", "TEXT NOT NULL DEFAULT ''"),
             ("opponent_pool_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("opponent_pool_config_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("promotion_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("promotion_config_hash", "TEXT NOT NULL DEFAULT ''"),
         ]
         for col_name, col_type in new_exp_cols:
@@ -248,4 +250,4 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
                 except Exception:
                     pass
 
-        cur.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (3)")
+        cur.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (4)")

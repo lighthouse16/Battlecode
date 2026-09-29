@@ -64,6 +64,7 @@ class ExperimentEvaluator:
         eval_config_path: Path | str | None = None,
         opponent_pool_path: Path | str | None = None,
         max_workers: int | None = None,
+        promotion_config_path: Path | str | None = None,
     ) -> dict[str, Any]:
         """Execute paired evaluation matrix for an experiment against opponent pool."""
         exp = self.registry.get_experiment(experiment_id)
@@ -91,10 +92,17 @@ class ExperimentEvaluator:
             opponent_pool_config_hash = hash_dict(opp_cfg)
             resolved_opponents = self._ensure_opponent_artifacts(opp_cfg)
 
+            # Load promotion configuration early for provenance
+            prom_path = promotion_config_path or "configs/promotion.yaml"
+            prom_cfg = load_yaml_config(prom_path)
+            promotion_config_hash = hash_dict(prom_cfg)
+
             exp.evaluation_config = cfg
             exp.evaluation_config_hash = eval_config_hash
             exp.opponent_pool_config = opp_cfg
             exp.opponent_pool_config_hash = opponent_pool_config_hash
+            exp.promotion_config = prom_cfg
+            exp.promotion_config_hash = promotion_config_hash
 
             # Fallback to direct head-to-head if pool is empty
             if not resolved_opponents:
@@ -173,7 +181,7 @@ class ExperimentEvaluator:
             # Late import to prevent circular dependency
             from battlelab.experiments.promotion import PromotionGate
 
-            gate = PromotionGate(self.db)
+            gate = PromotionGate(self.db, config_path=prom_path)
             gate_res = gate.check_criteria(exp, metrics)
 
             report_md = generate_experiment_report(exp, metrics, gate_res)

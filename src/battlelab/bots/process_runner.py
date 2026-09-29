@@ -17,7 +17,7 @@ import psutil
 
 def is_process_active(pid: int) -> bool:
     """Check if process exists and is actively executing (not dead or zombie)."""
-    if not psutil.pid_exists(pid):
+    if pid <= 0:
         return False
     try:
         p = psutil.Process(pid)
@@ -26,7 +26,25 @@ def is_process_active(pid: int) -> bool:
             return False
         return p.is_running()
     except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return False
+        pass
+    except Exception:
+        pass
+
+    if platform.system() != "Windows":
+        try:
+            import errno
+            import os
+
+            os.kill(pid, 0)
+            return True
+        except OSError as e:
+            if e.errno == errno.EPERM:
+                return True
+            return False
+        except Exception:
+            return False
+
+    return False
 
 
 def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0) -> None:
@@ -47,7 +65,7 @@ def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0)
         # Put children first so leaf processes are handled before parent
         procs_to_clean = children + [parent_ps]
     except (psutil.NoSuchProcess, psutil.AccessDenied):
-        # Parent already exited; continue to cleanup any remaining processes
+        # Parent already exited or not visible in psutil namespace; continue
         pass
 
     # 2. Phase 1: Graceful termination
@@ -73,9 +91,23 @@ def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
+    # Ensure proc itself receives termination even if psutil could not resolve PID
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
     # Wait bounded time for graceful termination
     half_timeout = max(0.05, timeout_seconds * 0.4)
-    _, still_alive = psutil.wait_procs(procs_to_clean, timeout=half_timeout)
+    if procs_to_clean:
+        _, still_alive = psutil.wait_procs(procs_to_clean, timeout=half_timeout)
+    else:
+        still_alive = []
+        try:
+            proc.wait(timeout=half_timeout)
+        except Exception:
+            pass
 
     # 3. Phase 2: Force kill for any process that ignored SIGTERM or is still running
     if still_alive:
@@ -102,6 +134,17 @@ def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         psutil.wait_procs(still_alive, timeout=half_timeout)
+
+    # Ensure proc itself is killed if still alive
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=half_timeout)
+        except Exception:
+            pass
 
     # 4. Reap parent process via Popen
     try:
@@ -197,6 +240,7 @@ class BotSubprocess:
             mem_bytes = int(self.memory_limit_mb * 1024 * 1024)
             cmd = [
                 sys.executable,
+                "-B",
                 "-u",
                 "-c",
                 (
@@ -207,14 +251,14 @@ class BotSubprocess:
                 ),
             ]
         else:
-            cmd = [sys.executable, "-u", str(self.entrypoint_path)]
+            cmd = [sys.executable, "-B", "-u", str(self.entrypoint_path)]
 
-        merged_env = None
+        import os
+
+        merged_env = os.environ.copy()
         if self.env:
-            import os
-
-            merged_env = os.environ.copy()
             merged_env.update(self.env)
+        merged_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         self.proc = subprocess.Popen(
             cmd,

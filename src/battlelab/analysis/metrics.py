@@ -444,13 +444,18 @@ def calculate_paired_experiment_metrics(
         }
 
     # Runtime headroom: strictly from challenger per-turn bot measurements
+    challenger_match_count = 0
+    challenger_telemetry_match_count = 0
+    missing_telemetry_count = 0
     challenger_turn_durations: list[float] = []
+
     for m in matches:
         is_challenger_a = m.get("bot_a_id") == challenger_id
         is_challenger_b = m.get("bot_b_id") == challenger_id
         if not is_challenger_a and not is_challenger_b:
             continue
 
+        challenger_match_count += 1
         stats_key = "bot_a_stats" if is_challenger_a else "bot_b_stats"
         stats = m.get(stats_key)
         if not stats or not isinstance(stats, dict):
@@ -464,28 +469,20 @@ def calculate_paired_experiment_metrics(
                 if isinstance(rj, dict) and stats_key in rj and isinstance(rj[stats_key], dict):
                     stats = rj[stats_key]
 
+        match_turns: list[float] = []
         if isinstance(stats, dict):
             if t_durs := stats.get("turn_durations_ms"):
-                challenger_turn_durations.extend([float(x) for x in t_durs])
+                match_turns.extend([float(x) for x in t_durs])
             elif (max_turn := stats.get("max_turn_ms")) is not None:
-                challenger_turn_durations.append(float(max_turn))
+                match_turns.append(float(max_turn))
 
-    if not challenger_turn_durations:
-        # ponytail: fallback to whole-match duration if bot turn-level telemetry absent
-        for m in matches:
-            if m.get("bot_a_id") == challenger_id or m.get("bot_b_id") == challenger_id:
-                if dur := m.get("duration_ms"):
-                    challenger_turn_durations.append(float(dur))
+        if match_turns:
+            challenger_telemetry_match_count += 1
+            challenger_turn_durations.extend(match_turns)
+        else:
+            missing_telemetry_count += 1
 
-    if challenger_turn_durations:
-        challenger_turn_durations.sort()
-        p50 = statistics.median(challenger_turn_durations)
-        p90_idx = int(0.90 * len(challenger_turn_durations))
-        p99_idx = int(0.99 * len(challenger_turn_durations))
-        p90 = challenger_turn_durations[min(p90_idx, len(challenger_turn_durations) - 1)]
-        p99 = challenger_turn_durations[min(p99_idx, len(challenger_turn_durations) - 1)]
-    else:
-        p50, p90, p99 = 0.0, 0.0, 0.0
+    runtime_telemetry_complete = challenger_match_count > 0 and missing_telemetry_count == 0
 
     per_turn_limit = 5000.0
     for m in matches:
@@ -493,14 +490,28 @@ def calculate_paired_experiment_metrics(
             per_turn_limit = float(limit)
             break
 
-    headroom = 1.0 - (p99 / per_turn_limit) if per_turn_limit > 0 else 1.0
-    overall["runtime_percentiles_ms"] = {
-        "p50": round(p50, 2),
-        "p90": round(p90, 2),
-        "p99": round(p99, 2),
-    }
-    overall["runtime_headroom"] = round(max(0.0, min(1.0, headroom)), 4)
+    overall["runtime_telemetry_complete"] = runtime_telemetry_complete
+    overall["runtime_telemetry_match_count"] = challenger_match_count
+    overall["runtime_telemetry_missing_count"] = missing_telemetry_count
     overall["per_turn_limit_ms"] = per_turn_limit
+
+    if runtime_telemetry_complete and challenger_turn_durations:
+        challenger_turn_durations.sort()
+        p50 = statistics.median(challenger_turn_durations)
+        p90_idx = int(0.90 * len(challenger_turn_durations))
+        p99_idx = int(0.99 * len(challenger_turn_durations))
+        p90 = challenger_turn_durations[min(p90_idx, len(challenger_turn_durations) - 1)]
+        p99 = challenger_turn_durations[min(p99_idx, len(challenger_turn_durations) - 1)]
+        headroom = 1.0 - (p99 / per_turn_limit) if per_turn_limit > 0 else 1.0
+        overall["runtime_percentiles_ms"] = {
+            "p50": round(p50, 2),
+            "p90": round(p90, 2),
+            "p99": round(p99, 2),
+        }
+        overall["runtime_headroom"] = round(max(0.0, min(1.0, headroom)), 4)
+    else:
+        overall["runtime_percentiles_ms"] = None
+        overall["runtime_headroom"] = None
 
     # Direct head-to-head metrics if present
     direct_metrics = (

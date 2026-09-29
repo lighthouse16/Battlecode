@@ -226,6 +226,7 @@ class Experiment:
     evaluation_config_hash: str = ""
     opponent_pool_config: dict[str, Any] = field(default_factory=dict)
     opponent_pool_config_hash: str = ""
+    promotion_config: dict[str, Any] = field(default_factory=dict)
     promotion_config_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:

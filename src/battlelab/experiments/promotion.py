@@ -35,7 +35,7 @@ class PromotionGate:
         config_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Check whether experiment results satisfy promotion criteria."""
-        cfg = config_override or load_yaml_config(self.config_path)
+        cfg = config_override or exp.promotion_config or load_yaml_config(self.config_path)
 
         min_sample = cfg.get("min_sample_size", 6)
         min_win_rate = cfg.get("min_win_rate", 0.50)
@@ -60,7 +60,7 @@ class PromotionGate:
         crash_rate = agg.get("crash_rate", 0.0)
         timeout_rate = agg.get("timeout_rate", 0.0)
         invalid_rate = agg.get("invalid_action_rate", 0.0)
-        headroom = agg.get("runtime_headroom", 1.0)
+        headroom = agg.get("runtime_headroom")
 
         paired = metrics.get("paired_analysis", {})
         mean_score_delta = paired.get("mean_score_delta", 0.0)
@@ -92,27 +92,68 @@ class PromotionGate:
             )
 
         min_segment_sample = cfg.get("min_segment_sample_size", 1)
+
+        eval_cfg = exp.evaluation_config or {}
+        opp_cfg = exp.opponent_pool_config or {}
+
+        expected_seeds = [str(s) for s in eval_cfg.get("seeds", [])]
+        expected_maps = [str(m) for m in eval_cfg.get("maps", [])]
+
+        opponents_list = opp_cfg.get("opponents", []) if isinstance(opp_cfg, dict) else []
+        expected_groups: list[str] = []
+        for o in opponents_list:
+            if isinstance(o, dict) and "group" in o:
+                expected_groups.append(str(o["group"]))
+            elif hasattr(o, "group"):
+                expected_groups.append(str(o.group))
+        if not expected_groups:
+            expected_groups = ["baseline"]
+        expected_groups = list(dict.fromkeys(expected_groups))
+
+        paired_sides = eval_cfg.get("paired_sides", True)
+        expected_sides = ["side_0", "side_1"] if paired_sides else ["side_0"]
+
+        by_grp = paired.get("by_opponent_group", {})
+        by_map = paired.get("by_map", {})
+        by_side = paired.get("by_side", {})
+        by_seed = paired.get("by_seed", {})
+
+        all_seeds = sorted(set(expected_seeds) | set(by_seed.keys()))
+        all_maps = sorted(set(expected_maps) | set(by_map.keys()))
+        all_groups = sorted(set(expected_groups) | set(by_grp.keys()))
+        all_sides = sorted(set(expected_sides) | set(by_side.keys()))
+
+        segment_sample_counts = {
+            "by_seed": {s: by_seed.get(s, {}).get("pair_count", 0) for s in all_seeds},
+            "by_map": {m: by_map.get(m, {}).get("pair_count", 0) for m in all_maps},
+            "by_opponent_group": {g: by_grp.get(g, {}).get("pair_count", 0) for g in all_groups},
+            "by_side": {s: by_side.get(s, {}).get("pair_count", 0) for s in all_sides},
+        }
+
         if min_segment_sample > 1:
-            by_grp = paired.get("by_opponent_group", {})
-            for grp_name, grp_stats in by_grp.items():
-                p_cnt = grp_stats.get("pair_count", 0)
+            for s in all_seeds:
+                p_cnt = segment_sample_counts["by_seed"][s]
                 if p_cnt < min_segment_sample:
                     violations.append(
-                        f"Insufficient evidence: Opponent group '{grp_name}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                        f"Insufficient evidence: Seed '{s}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
                     )
-            by_map = paired.get("by_map", {})
-            for map_name, map_stats in by_map.items():
-                p_cnt = map_stats.get("pair_count", 0)
+            for m in all_maps:
+                p_cnt = segment_sample_counts["by_map"][m]
                 if p_cnt < min_segment_sample:
                     violations.append(
-                        f"Insufficient evidence: Map '{map_name}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                        f"Insufficient evidence: Map '{m}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
                     )
-            by_side = paired.get("by_side", {})
-            for side_name, side_stats in by_side.items():
-                p_cnt = side_stats.get("pair_count", 0)
+            for g in all_groups:
+                p_cnt = segment_sample_counts["by_opponent_group"][g]
                 if p_cnt < min_segment_sample:
                     violations.append(
-                        f"Insufficient evidence: Side '{side_name}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                        f"Insufficient evidence: Opponent group '{g}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                    )
+            for sd in all_sides:
+                p_cnt = segment_sample_counts["by_side"][sd]
+                if p_cnt < min_segment_sample:
+                    violations.append(
+                        f"Insufficient evidence: Side '{sd}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
                     )
 
         # 3. Overall Win Rate threshold
@@ -142,10 +183,21 @@ class PromotionGate:
                 )
 
         # 6. Runtime headroom
-        if headroom < min_runtime_headroom:
-            violations.append(
-                f"Runtime headroom {headroom:.1%} is below minimum requirement of {min_runtime_headroom:.1%}."
-            )
+        if min_runtime_headroom > 0.0:
+            if agg.get("runtime_telemetry_complete") is False:
+                missing_cnt = agg.get("runtime_telemetry_missing_count", 0)
+                violations.append(
+                    f"Runtime telemetry incomplete: {missing_cnt} challenger matches have no per-turn measurements."
+                )
+            if headroom is None:
+                if agg.get("runtime_telemetry_complete") is not False:
+                    violations.append(
+                        f"Runtime headroom is unavailable and below minimum requirement of {min_runtime_headroom:.1%}."
+                    )
+            elif headroom < min_runtime_headroom:
+                violations.append(
+                    f"Runtime headroom {headroom:.1%} is below minimum requirement of {min_runtime_headroom:.1%}."
+                )
 
         # 7. Reliability constraints
         if crash_rate > max_crash:
@@ -201,6 +253,7 @@ class PromotionGate:
             "passed": passed,
             "violations": violations,
             "config_applied": cfg,
+            "segment_sample_counts": segment_sample_counts,
             "metrics_evaluated": {
                 "total_scheduled": total_scheduled,
                 "valid_matches": valid_matches,
@@ -409,7 +462,7 @@ class PromotionGate:
         promotion_id = f"prom_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
         mode = "MANUAL_OVERRIDE" if is_override else "MANUAL_VERIFIED"
         challenger_art = self.registry.get_artifact(exp.challenger_artifact_id)
-        promotion_config_hash = hash_dict(check_res["config_applied"])
+        promotion_config_hash = exp.promotion_config_hash or hash_dict(check_res["config_applied"])
 
         self.db.save_promotion(
             promotion_id=promotion_id,
