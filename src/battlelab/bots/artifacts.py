@@ -54,12 +54,35 @@ def compute_artifact_manifest(
     """Build a complete manifest of relative paths, content hashes, sizes, and entrypoint."""
     files: dict[str, dict[str, Any]] = {}
 
+    try:
+        st = os.lstat(src)
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"Symlinks are not permitted as bot source: {src}")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Bot source not found: {src}")
+    except OSError:
+        pass
+
+    if src.is_symlink():
+        raise ValueError(f"Symlinks are not permitted as bot source: {src}")
+
     if src.is_file():
+        if src.name.startswith("."):
+            raise ValueError(f"Hidden files are not permitted as bot source: {src.name}")
+        if src.name.endswith((".pyc", ".pyo")):
+            raise ValueError(f"Compiled bytecode files are not permitted as bot source: {src.name}")
+        if src.name == "__pycache__":
+            raise ValueError(f"__pycache__ directories are not permitted as bot source: {src.name}")
         entrypoint_rel = src.name
         sha = hash_file(src)
         size = src.stat().st_size
         files[src.name] = {"sha256": sha, "size_bytes": size}
     elif src.is_dir():
+        if src.name.startswith("."):
+            raise ValueError(f"Hidden directories are not permitted as bot source: {src.name}")
+        if src.name == "__pycache__":
+            raise ValueError(f"__pycache__ directories are not permitted as bot source: {src.name}")
+
         # Determine and validate explicit entrypoint if provided
         if entrypoint:
             ep_str = entrypoint.replace("\\", "/").strip()
@@ -93,23 +116,44 @@ def compute_artifact_manifest(
                 )
             entrypoint_rel = found
 
-        if src.is_symlink():
-            raise ValueError(f"Symlinks are not permitted as bot source: {src}")
-
         for root, dirs, filenames in os.walk(src, followlinks=False):
-            for d in list(dirs):
+            for d in dirs:
                 dpath = Path(root) / d
+                rel_d = dpath.relative_to(src).as_posix()
+                try:
+                    dst = os.lstat(dpath)
+                    if stat.S_ISLNK(dst.st_mode):
+                        raise ValueError(f"Symlinks are not permitted in bot source: {rel_d}")
+                except OSError:
+                    pass
                 if dpath.is_symlink():
-                    raise ValueError(f"Symlinks are not permitted in bot source: {dpath}")
-            dirs[:] = [d for d in dirs if d != "__pycache__" and not d.startswith(".")]
+                    raise ValueError(f"Symlinks are not permitted in bot source: {rel_d}")
+                if d.startswith("."):
+                    raise ValueError(f"Hidden directories are not permitted in bot source: {rel_d}")
+                if d == "__pycache__":
+                    raise ValueError(
+                        f"__pycache__ directories are not permitted in bot source: {rel_d}"
+                    )
+
             for fname in filenames:
                 fpath = Path(root) / fname
+                rel_f = fpath.relative_to(src).as_posix()
+                try:
+                    fst = os.lstat(fpath)
+                    if stat.S_ISLNK(fst.st_mode):
+                        raise ValueError(f"Symlinks are not permitted in bot source: {rel_f}")
+                except OSError:
+                    pass
                 if fpath.is_symlink():
-                    raise ValueError(f"Symlinks are not permitted in bot source: {fpath}")
-                if fname.endswith(".pyc") or fname.startswith("."):
-                    continue
-                rel = fpath.relative_to(src).as_posix()
-                files[rel] = {
+                    raise ValueError(f"Symlinks are not permitted in bot source: {rel_f}")
+                if fname.startswith("."):
+                    raise ValueError(f"Hidden files are not permitted in bot source: {rel_f}")
+                if fname.endswith((".pyc", ".pyo")):
+                    raise ValueError(
+                        f"Compiled bytecode files are not permitted in bot source: {rel_f}"
+                    )
+
+                files[rel_f] = {
                     "sha256": hash_file(fpath),
                     "size_bytes": fpath.stat().st_size,
                 }
@@ -329,15 +373,28 @@ def create_bot_artifact(
     parent_artifact_id: str | None = None,
     entrypoint: str | None = None,
 ) -> BotArtifact:
-    """Build and freeze a bot source into an immutable artifact snapshot with full manifest."""
-    src = Path(source_path).resolve()
-    if not src.exists():
-        raise FileNotFoundError(f"Bot source not found: {src}")
+    raw_path = Path(source_path)
 
+    try:
+        st = os.lstat(raw_path)
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"Symlinks are not permitted as bot source: {source_path}")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Bot source not found: {source_path}")
+    except OSError:
+        pass
+
+    if raw_path.is_symlink():
+        raise ValueError(f"Symlinks are not permitted as bot source: {source_path}")
+
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Bot source not found: {source_path}")
+
+    # Compute complete cryptographic manifest from raw path before resolving
+    file_manifest, entrypoint_rel, manifest_hash = compute_artifact_manifest(raw_path, entrypoint)
+
+    src = raw_path.resolve()
     name = display_name or src.stem
-
-    # Compute complete cryptographic manifest
-    file_manifest, entrypoint_rel, manifest_hash = compute_artifact_manifest(src, entrypoint)
 
     # Calculate overall content hash for backwards compatibility and artifact ID
     if src.is_dir():

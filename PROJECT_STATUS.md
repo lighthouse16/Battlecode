@@ -1,8 +1,8 @@
 # Battlelab Project Status
 
 ## Status Summary
-- **Phase**: Phase 2.1.2 Complete (Strict Integrity, Configuration Snapshot Provenance, Complete Segment Evidence, Strict Challenger Telemetry, and PID Portability Hardening)
-- **Current Milestone**: Full local R&D platform operational with real subprocess bot execution, per-turn deadline enforcement, atomic SQLite job leases with lease fencing tokens, multi-scheduler safety, paired opponent-pool evaluation with weighted bootstrap confidence intervals, positive lower CI gates, pure per-turn runtime headroom gates, hardened promotion gates with explicit human override audit trails, collision-resistant promotion and match IDs, complete artifact integrity checks with directory/file symlink rejection and unmanifested entry rejection, full configuration provenance tracking (storing exact promotion config snapshots on experiments), and CI quality gates across Ubuntu and Windows on Python 3.11 and 3.12.
+- **Phase**: Phase 2.1.3 Complete (Final Edge-Case Correctness Patch: Global Child Reaping Removal, Segment Minimum at Threshold 1, Root Source Symlink Rejection, Prohibited Source Entries Erroring, Runtime Telemetry Invariant and Count Semantics)
+- **Current Milestone**: Full local R&D platform operational with real subprocess bot execution, per-turn deadline enforcement, atomic SQLite job leases with lease fencing tokens, multi-scheduler safety, paired opponent-pool evaluation with weighted bootstrap confidence intervals, positive lower CI gates, pure per-turn runtime headroom gates with exact telemetry count invariants, segment evidence enforcement down to threshold 1, rejection of root and nested source symlinks as well as prohibited hidden/cache/bytecode files, clean process-tree termination without global child reaping, pre-promotion integrity verification, and CI quality gates across Ubuntu and Windows on Python 3.11 and 3.12.
 - **Engine Status**: 
   - `MockAdapter`: Real subprocess execution over line-delimited JSON stdin/stdout protocol strictly from frozen, cryptographically verified artifact snapshots (`data/artifacts/<id>/`).
   - `OfficialPlaceholderAdapter`: Strict placeholder awaiting Autumn rulebook and SDK documentation.
@@ -42,21 +42,22 @@
 - [x] CLI `--entrypoint` Option: Added `--entrypoint` argument to `battlelab bot register` with validation.
 - [x] Isolated & Repeatable E2E Demonstration (`scripts/demonstrate_e2e.py`): Fully isolated via `tempfile.TemporaryDirectory()`, tests pause (`INTERRUPTED 2/8`) and resume (`COMPLETED 8/8`), with zero repository mutation.
 - [x] GitHub Actions CI Matrix: Complete matrix workflow (`.github/workflows/ci.yml`) on Ubuntu/Windows for Python 3.11 and 3.12 running ruff format, ruff check, mypy, pytest, demonstrate_e2e twice, CLI tournament, and working tree cleanliness check.
-- [x] Complete automated test suite (64 unit, integration, and contract tests including all 34 Phase 2.1.2 regression tests).
+- [x] Complete automated test suite (69 unit, integration, and contract tests including all 39 Phase 2.1.3 regression tests).
 
 ## Currently Verified Behaviors
 - `battlelab doctor` accurately diagnoses environment, data directories, active champion, adapter readiness, and OS memory limit capabilities.
 - `battlelab config validate` parses and validates all YAML configs in `configs/`.
 - `battlelab champion status` and `battlelab champion rollback` manage champion manifest state and write full DB audit logs.
 - Hard 10ms timeout verified: returns in < 0.8s on 10ms limit without leaving orphan processes alive.
-- Process tree termination verified: terminates nested child processes spawned by target bots across container PID namespaces without affecting unrelated processes.
+- Process tree termination verified: terminates nested child processes spawned by target bots across container PID namespaces without global child reaping, preserving exit code 7 of unrelated children and leaving concurrent running processes alive.
 - Multi-scheduler concurrency verified: two concurrent schedulers leasing from the same DB complete all matches exactly once without duplicate runs.
 - Expired lease recovery verified: crashed worker leases are safely recovered and re-executed.
 - Authentic fencing token verified: stale worker completing after lease expiration is rejected by lease token check.
 - Active cancellation on lease loss verified: process tree terminated and match aborted when lease renewal fails.
 - Multi-seed determinism verified: passes on deterministic bots, reliably catches nondeterministic bots.
-- Manifest forgery defense verified: altered files, altered entrypoints, fake manifest hashes, path traversals, directory symlinks, file symlinks, and extraneous files rejected.
-- Pure per-turn headroom verified: fast multi-turn matches pass; single slow turns fail headroom gate; missing telemetry fails closed.
+- Manifest forgery defense verified: altered files, altered entrypoints, fake manifest hashes, path traversals, directory symlinks, file symlinks, root symlinks, prohibited hidden/cache/bytecode files, and extraneous files rejected.
+- Pure per-turn headroom verified: fast multi-turn matches pass; single slow turns fail headroom gate; missing telemetry fails closed; exact telemetry count invariant enforced.
+- Segment evidence enforced: minimum segment sample size threshold of 1 enforced across seeds, maps, opponent groups, and sides; threshold 0 disables check; non-negative integer type validation.
 - Promotion gates verified: blocks failing bots, accepts statistical improvements, requires positive lower CI, verifies runtime headroom, enforces opponent weights, checks pre-promotion integrity, audits rollbacks, and uses recorded experiment configuration snapshots.
 - End-to-end demonstration script passes all 12 steps cleanly twice in clean temporary directories without repository mutation.
 
@@ -73,11 +74,10 @@
 - `python -m ruff format --check src tests scripts` (60 files already formatted)
 - `python -m ruff check src tests scripts` (All checks passed!)
 - `python -m mypy src tests` (Success: no issues found in 59 source files)
-- `python -m pytest` (64 passed in 207.55s)
+- `python -m pytest` (69 passed in 180.18s)
 - `python scripts/demonstrate_e2e.py` (Run 1: all 12 steps completed successfully!)
 - `python scripts/demonstrate_e2e.py` (Run 2: all 12 steps completed successfully!)
 - `python -m battlelab doctor` (Exit code 0)
 - `python -m battlelab config validate` (Exit code 0)
-- `python -m battlelab tournament run --workers 2` (Exit code 0)
 - `git status` (Clean repository status, zero uncommitted data/ files)
 

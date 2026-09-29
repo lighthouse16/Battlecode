@@ -92,6 +92,15 @@ class PromotionGate:
             )
 
         min_segment_sample = cfg.get("min_segment_sample_size", 1)
+        if (
+            isinstance(min_segment_sample, bool)
+            or not isinstance(min_segment_sample, int)
+            or min_segment_sample < 0
+        ):
+            violations.append(
+                f"Invalid 'min_segment_sample_size': must be a non-negative integer, got {repr(min_segment_sample)}."
+            )
+            min_segment_sample = 0
 
         eval_cfg = exp.evaluation_config or {}
         opp_cfg = exp.opponent_pool_config or {}
@@ -130,7 +139,7 @@ class PromotionGate:
             "by_side": {s: by_side.get(s, {}).get("pair_count", 0) for s in all_sides},
         }
 
-        if min_segment_sample > 1:
+        if min_segment_sample > 0:
             for s in all_seeds:
                 p_cnt = segment_sample_counts["by_seed"][s]
                 if p_cnt < min_segment_sample:
@@ -189,11 +198,10 @@ class PromotionGate:
                 violations.append(
                     f"Runtime telemetry incomplete: {missing_cnt} challenger matches have no per-turn measurements."
                 )
-            if headroom is None:
-                if agg.get("runtime_telemetry_complete") is not False:
-                    violations.append(
-                        f"Runtime headroom is unavailable and below minimum requirement of {min_runtime_headroom:.1%}."
-                    )
+            elif headroom is None:
+                violations.append(
+                    f"Runtime headroom is unavailable and below minimum requirement of {min_runtime_headroom:.1%}."
+                )
             elif headroom < min_runtime_headroom:
                 violations.append(
                     f"Runtime headroom {headroom:.1%} is below minimum requirement of {min_runtime_headroom:.1%}."

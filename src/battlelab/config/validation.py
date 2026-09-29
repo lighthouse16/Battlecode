@@ -34,6 +34,10 @@ def validate_promotion_config(config: dict[str, Any]) -> list[str]:
         val = config.get(rate_key, -1.0)
         if not (0.0 <= val <= 1.0):
             errors.append(f"'{rate_key}' must be between 0.0 and 1.0")
+    if "min_segment_sample_size" in config:
+        seg_val = config["min_segment_sample_size"]
+        if isinstance(seg_val, bool) or not isinstance(seg_val, int) or seg_val < 0:
+            errors.append("'min_segment_sample_size' must be a non-negative integer")
     return errors
 
 

@@ -1099,7 +1099,7 @@ def test_31_promotion_uses_stored_config_snapshot(tmp_path: Path):
         "min_sample_size": 4,
         "min_win_rate": 0.50,
         "require_determinism_pass": False,
-        "min_segment_sample_size": 1,
+        "min_segment_sample_size": 0,
     }
     exp_reg.update_experiment(exp)
 
@@ -1239,3 +1239,380 @@ def test_34_pid_namespace_portability_and_concurrency_isolation():
         assert is_process_active(unrelated.pid)
     finally:
         terminate_process_tree(unrelated, timeout_seconds=1.0)
+
+
+def test_35_unrelated_exited_child_preserves_exit_code():
+    """35. terminate_process_tree must not reap unrelated exited child processes (preserves exit code 7)."""
+    for _ in range(3):
+        unrelated = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(7)"])
+        while unrelated.poll() is None:
+            time.sleep(0.01)
+
+        target = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        concurrent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+        try:
+            terminate_process_tree(target, timeout_seconds=1.0)
+            assert unrelated.wait() == 7
+            assert concurrent.poll() is None
+        finally:
+            terminate_process_tree(concurrent, timeout_seconds=1.0)
+            if unrelated.poll() is None:
+                unrelated.kill()
+
+
+def test_36_segment_minimum_enforced_at_threshold_one(tmp_path: Path):
+    """36. Segment minimum of 1 fails when expected segment has 0 pairs; 0 disables; 1 passes with 1 pair."""
+    db = Database(tmp_path / "seg_thresh.db")
+    gate = PromotionGate(db)
+
+    exp = Experiment(
+        experiment_id="exp_seg_one",
+        hypothesis="Segment threshold 1 test",
+        baseline_artifact_id="b",
+        challenger_artifact_id="c",
+        intended_change="Check threshold 1 and 0",
+        evaluation_config={
+            "seeds": [1, 2],
+            "maps": ["map_a"],
+            "paired_sides": True,
+        },
+        opponent_pool_config={
+            "opponents": [{"group": "group_x"}],
+        },
+    )
+
+    metrics_missing_seed = {
+        "aggregate": {
+            "valid_matches": 2,
+            "win_rate": 0.80,
+            "runtime_headroom": 0.50,
+            "runtime_telemetry_complete": True,
+        },
+        "paired_analysis": {
+            "completed_pairs": 1,
+            "mean_score_delta": 5.0,
+            "weighted_mean_win_delta": 0.30,
+            "score_delta_bootstrap_ci_95": [1.0, 9.0],
+            "win_delta_bootstrap_ci_95": [0.10, 0.50],
+            "by_seed": {"1": {"pair_count": 1}},
+            "by_map": {"map_a": {"pair_count": 1}},
+            "by_opponent_group": {"group_x": {"pair_count": 1}},
+            "by_side": {"side_0": {"pair_count": 1}, "side_1": {"pair_count": 0}},
+        },
+    }
+
+    # min_segment_sample_size = 1 -> fail missing seed 2 and side_1
+    check1 = gate.check_criteria(
+        exp,
+        metrics_missing_seed,
+        config_override={
+            "min_segment_sample_size": 1,
+            "min_sample_size": 1,
+            "require_determinism_pass": False,
+        },
+    )
+    assert check1["passed"] is False
+    assert any("seed '2' has 0 pair" in v.lower() for v in check1["violations"])
+
+    # min_segment_sample_size = 0 -> disables check
+    check0 = gate.check_criteria(
+        exp,
+        metrics_missing_seed,
+        config_override={
+            "min_segment_sample_size": 0,
+            "min_sample_size": 1,
+            "require_determinism_pass": False,
+        },
+    )
+    assert not any("segment sample size" in v.lower() for v in check0["violations"])
+
+    # Complete segments with 1 pair each passes when min_segment_sample_size = 1
+    metrics_complete = {
+        "aggregate": {
+            "valid_matches": 4,
+            "win_rate": 0.80,
+            "runtime_headroom": 0.50,
+            "runtime_telemetry_complete": True,
+        },
+        "paired_analysis": {
+            "completed_pairs": 2,
+            "mean_score_delta": 5.0,
+            "weighted_mean_win_delta": 0.30,
+            "score_delta_bootstrap_ci_95": [1.0, 9.0],
+            "win_delta_bootstrap_ci_95": [0.10, 0.50],
+            "by_seed": {"1": {"pair_count": 1}, "2": {"pair_count": 1}},
+            "by_map": {"map_a": {"pair_count": 2}},
+            "by_opponent_group": {"group_x": {"pair_count": 2}},
+            "by_side": {"side_0": {"pair_count": 1}, "side_1": {"pair_count": 1}},
+        },
+    }
+    check_pass = gate.check_criteria(
+        exp,
+        metrics_complete,
+        config_override={
+            "min_segment_sample_size": 1,
+            "min_sample_size": 2,
+            "require_determinism_pass": False,
+        },
+    )
+    assert check_pass["passed"] is True
+
+    # Invalid min_segment_sample_size type (bool, negative, string) appends violation
+    for invalid_val in [True, False, -1, "one"]:
+        check_inv = gate.check_criteria(
+            exp,
+            metrics_complete,
+            config_override={
+                "min_segment_sample_size": invalid_val,
+                "require_determinism_pass": False,
+            },
+        )
+        assert check_inv["passed"] is False
+        assert any("min_segment_sample_size" in v for v in check_inv["violations"])
+
+
+def test_37_root_source_symlinks_rejected(tmp_path: Path):
+    """37. create_bot_artifact and register_bot reject root dir symlinks, file symlinks, and broken symlinks."""
+    db = Database(tmp_path / "sym_root.db")
+    reg = BotRegistry(db)
+
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir()
+    (real_dir / "bot.py").write_text("print('hello')\n", encoding="utf-8")
+
+    real_file = tmp_path / "real_file.py"
+    real_file.write_text("print('hello file')\n", encoding="utf-8")
+
+    sym_dir = tmp_path / "sym_dir"
+    sym_file = tmp_path / "sym_file.py"
+    broken_sym = tmp_path / "broken_sym.py"
+
+    symlinks_supported = True
+    try:
+        sym_dir.symlink_to(real_dir, target_is_directory=True)
+        sym_file.symlink_to(real_file)
+        broken_sym.symlink_to(tmp_path / "nonexistent.py")
+    except (OSError, NotImplementedError):
+        symlinks_supported = False
+
+    if symlinks_supported:
+        # Directory symlink
+        with pytest.raises(ValueError, match="Symlinks are not permitted as bot source"):
+            create_bot_artifact(sym_dir, display_name="SymDirBot")
+        with pytest.raises(ValueError, match="Symlinks are not permitted as bot source"):
+            reg.register_bot(sym_dir, "SymDirBot")
+
+        # File symlink
+        with pytest.raises(ValueError, match="Symlinks are not permitted as bot source"):
+            create_bot_artifact(sym_file, display_name="SymFileBot")
+        with pytest.raises(ValueError, match="Symlinks are not permitted as bot source"):
+            reg.register_bot(sym_file, "SymFileBot")
+
+        # Broken symlink
+        with pytest.raises(ValueError, match="Symlinks are not permitted as bot source"):
+            create_bot_artifact(broken_sym, display_name="BrokenSymBot")
+        with pytest.raises(ValueError, match="Symlinks are not permitted as bot source"):
+            reg.register_bot(broken_sym, "BrokenSymBot")
+
+
+def test_38_prohibited_source_entries_rejected_not_ignored(tmp_path: Path):
+    """38. compute_artifact_manifest and create_bot_artifact explicitly reject prohibited entries naming them."""
+    # 1. Hidden file
+    dir1 = tmp_path / "bot1"
+    dir1.mkdir()
+    (dir1 / "bot.py").write_text("print(1)\n", encoding="utf-8")
+    (dir1 / ".hidden").write_text("secret\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"Hidden files are not permitted in bot source: .hidden"):
+        compute_artifact_manifest(dir1)
+    with pytest.raises(ValueError, match=r"Hidden files are not permitted in bot source: .hidden"):
+        create_bot_artifact(dir1, display_name="B1")
+
+    # 2. Hidden directory
+    dir2 = tmp_path / "bot2"
+    dir2.mkdir()
+    (dir2 / "bot.py").write_text("print(1)\n", encoding="utf-8")
+    (dir2 / ".git").mkdir()
+    with pytest.raises(
+        ValueError, match=r"Hidden directories are not permitted in bot source: .git"
+    ):
+        compute_artifact_manifest(dir2)
+    with pytest.raises(
+        ValueError, match=r"Hidden directories are not permitted in bot source: .git"
+    ):
+        create_bot_artifact(dir2, display_name="B2")
+
+    # 3. __pycache__ directory
+    dir3 = tmp_path / "bot3"
+    dir3.mkdir()
+    (dir3 / "bot.py").write_text("print(1)\n", encoding="utf-8")
+    (dir3 / "__pycache__").mkdir()
+    with pytest.raises(
+        ValueError, match=r"__pycache__ directories are not permitted in bot source: __pycache__"
+    ):
+        compute_artifact_manifest(dir3)
+    with pytest.raises(
+        ValueError, match=r"__pycache__ directories are not permitted in bot source: __pycache__"
+    ):
+        create_bot_artifact(dir3, display_name="B3")
+
+    # 4. .pyc file
+    dir4 = tmp_path / "bot4"
+    dir4.mkdir()
+    (dir4 / "bot.py").write_text("print(1)\n", encoding="utf-8")
+    (dir4 / "compiled.pyc").write_bytes(b"bad")
+    with pytest.raises(
+        ValueError, match=r"Compiled bytecode files are not permitted in bot source: compiled.pyc"
+    ):
+        compute_artifact_manifest(dir4)
+    with pytest.raises(
+        ValueError, match=r"Compiled bytecode files are not permitted in bot source: compiled.pyc"
+    ):
+        create_bot_artifact(dir4, display_name="B4")
+
+    # 5. .pyo file
+    dir5 = tmp_path / "bot5"
+    dir5.mkdir()
+    (dir5 / "bot.py").write_text("print(1)\n", encoding="utf-8")
+    (dir5 / "opt.pyo").write_bytes(b"bad")
+    with pytest.raises(
+        ValueError, match=r"Compiled bytecode files are not permitted in bot source: opt.pyo"
+    ):
+        compute_artifact_manifest(dir5)
+    with pytest.raises(
+        ValueError, match=r"Compiled bytecode files are not permitted in bot source: opt.pyo"
+    ):
+        create_bot_artifact(dir5, display_name="B5")
+
+
+def test_39_runtime_telemetry_count_semantics_and_invariant():
+    """39. runtime_challenger_match_count, runtime_telemetry_match_count, missing_count satisfy invariant, reject bad durations."""
+    matches = [
+        {
+            "match_id": "m1",
+            "bot_a_id": "challenger",
+            "bot_b_id": "baseline",
+            "seed": 42,
+            "map_name": "grid_classic_8x8",
+            "bot_a_turn_durations_ms": [10.0, 20.0],
+            "bot_b_turn_durations_ms": [5.0],
+            "outcome": "WIN_A",
+            "score_a": 1.0,
+            "score_b": 0.0,
+        },
+        {
+            "match_id": "m2",
+            "bot_a_id": "baseline",
+            "bot_b_id": "challenger",
+            "seed": 42,
+            "map_name": "grid_classic_8x8",
+            "bot_a_turn_durations_ms": [5.0],
+            "bot_b_turn_durations_ms": [15.0],
+            "outcome": "WIN_B",
+            "score_a": 0.0,
+            "score_b": 1.0,
+        },
+        {
+            "match_id": "m3",
+            "bot_a_id": "challenger",
+            "bot_b_id": "baseline",
+            "seed": 43,
+            "map_name": "grid_classic_8x8",
+            "bot_a_turn_durations_ms": [],
+            "outcome": "WIN_A",
+            "score_a": 1.0,
+            "score_b": 0.0,
+        },
+        {
+            "match_id": "m4",
+            "bot_a_id": "baseline",
+            "bot_b_id": "challenger",
+            "seed": 43,
+            "map_name": "grid_classic_8x8",
+            "bot_b_turn_durations_ms": [float("nan"), 10.0],
+            "outcome": "WIN_B",
+            "score_a": 0.0,
+            "score_b": 1.0,
+        },
+    ]
+
+    metrics = calculate_paired_experiment_metrics(
+        matches=matches,
+        challenger_id="challenger",
+        baseline_id="baseline",
+    )
+    agg = metrics["aggregate"]
+    assert agg["runtime_challenger_match_count"] == 4
+    assert agg["runtime_telemetry_match_count"] == 2
+    assert agg["runtime_telemetry_missing_count"] == 2
+    assert (
+        agg["runtime_telemetry_match_count"] + agg["runtime_telemetry_missing_count"]
+        == agg["runtime_challenger_match_count"]
+    )
+    assert agg["runtime_telemetry_complete"] is False
+    assert agg["runtime_headroom"] is None
+    assert agg["runtime_percentiles_ms"] is None
+
+    # Verify negative, inf, and non-numeric durations are also treated as missing telemetry
+    for bad_val in [-5.0, float("inf"), float("-inf"), "bad"]:
+        bad_matches = [
+            {
+                "match_id": "mbad",
+                "bot_a_id": "challenger",
+                "bot_b_id": "baseline",
+                "seed": 99,
+                "map_name": "grid_classic_8x8",
+                "bot_a_turn_durations_ms": [bad_val, 10.0],
+                "outcome": "WIN_A",
+                "score_a": 1.0,
+                "score_b": 0.0,
+            }
+        ]
+        bad_metrics = calculate_paired_experiment_metrics(
+            matches=bad_matches,
+            challenger_id="challenger",
+            baseline_id="baseline",
+        )
+        bad_agg = bad_metrics["aggregate"]
+        assert bad_agg["runtime_challenger_match_count"] == 1
+        assert bad_agg["runtime_telemetry_match_count"] == 0
+        assert bad_agg["runtime_telemetry_missing_count"] == 1
+        assert bad_agg["runtime_telemetry_complete"] is False
+
+    # Fully complete case
+    complete_matches = [
+        {
+            "match_id": "mc1",
+            "bot_a_id": "challenger",
+            "bot_b_id": "baseline",
+            "seed": 101,
+            "map_name": "grid_classic_8x8",
+            "bot_a_turn_durations_ms": [10.0, 20.0],
+            "outcome": "WIN_A",
+            "score_a": 1.0,
+            "score_b": 0.0,
+        },
+        {
+            "match_id": "mc2",
+            "bot_a_id": "baseline",
+            "bot_b_id": "challenger",
+            "seed": 101,
+            "map_name": "grid_classic_8x8",
+            "bot_b_turn_durations_ms": [15.0, 25.0],
+            "outcome": "WIN_B",
+            "score_a": 0.0,
+            "score_b": 1.0,
+        },
+    ]
+    comp_metrics = calculate_paired_experiment_metrics(
+        matches=complete_matches,
+        challenger_id="challenger",
+        baseline_id="baseline",
+    )
+    comp_agg = comp_metrics["aggregate"]
+    assert comp_agg["runtime_challenger_match_count"] == 2
+    assert comp_agg["runtime_telemetry_match_count"] == 2
+    assert comp_agg["runtime_telemetry_missing_count"] == 0
+    assert comp_agg["runtime_telemetry_complete"] is True
+    assert comp_agg["runtime_headroom"] is not None
+    assert comp_agg["runtime_percentiles_ms"] is not None

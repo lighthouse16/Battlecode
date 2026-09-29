@@ -57,6 +57,17 @@ def generate_experiment_report(
         f"- **Invalid Actions**: {agg.get('invalid_action_count', 0)}",
         f"- **Missing Replays**: {agg.get('missing_replays', 0)}",
     ]
+    chal_cnt = agg.get(
+        "runtime_challenger_match_count",
+        agg.get("runtime_telemetry_match_count", 0) + agg.get("runtime_telemetry_missing_count", 0),
+    )
+    telem_cnt = agg.get("runtime_telemetry_match_count", 0)
+    missing_cnt = agg.get("runtime_telemetry_missing_count", 0)
+    if chal_cnt > 0:
+        lines.append(
+            f"- **Challenger Telemetry Coverage**: {telem_cnt} / {chal_cnt} matches ({missing_cnt} missing)"
+        )
+
     if agg.get("runtime_telemetry_complete"):
         headroom = agg.get("runtime_headroom", 0.0)
         p_dict = agg.get("runtime_percentiles_ms") or {}
@@ -67,7 +78,6 @@ def generate_experiment_report(
             f"p99={p_dict.get('p99', 0)}"
         )
     else:
-        missing_cnt = agg.get("runtime_telemetry_missing_count", 0)
         lines.append(
             f"- **Runtime Headroom**: `UNAVAILABLE` (Incomplete telemetry: {missing_cnt} challenger match(es) missing per-turn measurements)"
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from typing import Any
 
@@ -457,6 +458,7 @@ def calculate_paired_experiment_metrics(
 
         challenger_match_count += 1
         stats_key = "bot_a_stats" if is_challenger_a else "bot_b_stats"
+        turns_key = "bot_a_turn_durations_ms" if is_challenger_a else "bot_b_turn_durations_ms"
         stats = m.get(stats_key)
         if not stats or not isinstance(stats, dict):
             rj = m.get("result_json")
@@ -469,16 +471,44 @@ def calculate_paired_experiment_metrics(
                 if isinstance(rj, dict) and stats_key in rj and isinstance(rj[stats_key], dict):
                     stats = rj[stats_key]
 
-        match_turns: list[float] = []
+        valid_turns: list[float] = []
+        is_match_telemetry_valid = False
+        raw_turns = None
         if isinstance(stats, dict):
-            if t_durs := stats.get("turn_durations_ms"):
-                match_turns.extend([float(x) for x in t_durs])
-            elif (max_turn := stats.get("max_turn_ms")) is not None:
-                match_turns.append(float(max_turn))
+            raw_turns = stats.get("turn_durations_ms")
+        if raw_turns is None and turns_key in m:
+            raw_turns = m[turns_key]
 
-        if match_turns:
+        if raw_turns and isinstance(raw_turns, list):
+            has_invalid = False
+            for x in raw_turns:
+                if isinstance(x, bool) or not isinstance(x, (int, float)):
+                    has_invalid = True
+                    break
+                try:
+                    val = float(x)
+                except (ValueError, TypeError):
+                    has_invalid = True
+                    break
+                if math.isnan(val) or math.isinf(val) or val < 0:
+                    has_invalid = True
+                    break
+                valid_turns.append(val)
+            if not has_invalid and len(valid_turns) > 0:
+                is_match_telemetry_valid = True
+        elif isinstance(stats, dict) and (max_turn := stats.get("max_turn_ms")) is not None:
+            if not isinstance(max_turn, bool) and isinstance(max_turn, (int, float)):
+                try:
+                    val = float(max_turn)
+                    if not (math.isnan(val) or math.isinf(val) or val < 0):
+                        valid_turns.append(val)
+                        is_match_telemetry_valid = True
+                except (ValueError, TypeError):
+                    pass
+
+        if is_match_telemetry_valid:
             challenger_telemetry_match_count += 1
-            challenger_turn_durations.extend(match_turns)
+            challenger_turn_durations.extend(valid_turns)
         else:
             missing_telemetry_count += 1
 
@@ -487,12 +517,16 @@ def calculate_paired_experiment_metrics(
     per_turn_limit = 5000.0
     for m in matches:
         if limit := (m.get("per_turn_limit_ms") or m.get("time_limit_ms")):
-            per_turn_limit = float(limit)
-            break
+            try:
+                per_turn_limit = float(limit)
+                break
+            except (ValueError, TypeError):
+                pass
 
-    overall["runtime_telemetry_complete"] = runtime_telemetry_complete
-    overall["runtime_telemetry_match_count"] = challenger_match_count
+    overall["runtime_challenger_match_count"] = challenger_match_count
+    overall["runtime_telemetry_match_count"] = challenger_telemetry_match_count
     overall["runtime_telemetry_missing_count"] = missing_telemetry_count
+    overall["runtime_telemetry_complete"] = runtime_telemetry_complete
     overall["per_turn_limit_ms"] = per_turn_limit
 
     if runtime_telemetry_complete and challenger_turn_durations:

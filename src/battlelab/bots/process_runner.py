@@ -146,27 +146,12 @@ def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0)
         except Exception:
             pass
 
-    # 4. Reap parent process via Popen
+    # 4. Bounded wait/reap on target process
     try:
         proc.poll()
-        proc.wait(timeout=0.1)
+        proc.wait(timeout=half_timeout)
     except Exception:
         pass
-
-    # 5. On POSIX, wait/reap any remaining zombies
-    if platform.system() != "Windows":
-        try:
-            import os
-
-            waitpid = getattr(os, "waitpid", None)
-            wnohang = getattr(os, "WNOHANG", 1)
-            if waitpid:
-                while True:
-                    wpid, _ = waitpid(-1, wnohang)
-                    if wpid <= 0:
-                        break
-        except Exception:
-            pass
 
 
 def check_memory_limit_support() -> tuple[bool, str]:
