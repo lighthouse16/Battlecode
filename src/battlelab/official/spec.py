@@ -48,7 +48,7 @@ def init_game_spec(
     """Initialize a typed game specification from an ingested source bundle."""
     # Verify bundle exists
     manifest = load_source_bundle_manifest(source_bundle_hash, bundles_dir=bundles_dir)
-    doc_hashes = [f.sha256 for f in manifest.files]
+    doc_hashes = sorted([f.sha256 for f in manifest.files])
 
     now_iso = datetime.now(timezone.utc).isoformat()
     rules: dict[str, RuleItem] = {}
@@ -65,7 +65,7 @@ def init_game_spec(
     spec = GameSpec(
         schema_version="1.0.0",
         competition_name="Battlecode",
-        competition_season="Autumn 2026",
+        competition_season="",
         spec_version="1.0.0",
         source_bundle_hash=source_bundle_hash,
         official_document_hashes=doc_hashes,
@@ -85,6 +85,7 @@ def init_game_spec(
 
 def validate_game_spec(
     spec_data: dict[str, Any],
+    bundles_dir: Path | None = None,
 ) -> tuple[bool, list[str], GameSpec | None, bool]:
     """Validate a game specification dictionary.
 
@@ -109,24 +110,63 @@ def validate_game_spec(
         "source_bundle_hash",
     ]:
         val = spec_data.get(field_name)
-        if not isinstance(val, str) or not val.strip():
+        if not isinstance(val, str):
+            errors.append(f"{field_name}: must be a string")
+        elif (
+            field_name in ("competition_name", "spec_version", "source_bundle_hash")
+            and not val.strip()
+        ):
             errors.append(f"{field_name}: must be a non-empty string")
+
+    # Validate source_bundle_hash format
+    bundle_hash = spec_data.get("source_bundle_hash")
+    if isinstance(bundle_hash, str) and (
+        len(bundle_hash) != 64 or not all(c in "0123456789abcdef" for c in bundle_hash)
+    ):
+        errors.append(
+            f"source_bundle_hash: must be 64 lowercase hex characters, got {bundle_hash!r}"
+        )
 
     # 3. Document hashes
     doc_hashes = spec_data.get("official_document_hashes")
-    if not isinstance(doc_hashes, list) or not all(isinstance(x, str) for x in doc_hashes):
-        errors.append("official_document_hashes: must be a list of strings")
+    if not isinstance(doc_hashes, list) or not all(
+        isinstance(x, str) and len(x) == 64 and all(c in "0123456789abcdef" for c in x)
+        for x in doc_hashes
+    ):
+        errors.append(
+            "official_document_hashes: must be a list of 64-character lowercase hex SHA-256 strings"
+        )
 
-    # 4. Rules dictionary
+    # 4. Bind spec to source bundle and verify document hashes and refs
+    valid_bundle_relpaths: set[str] | None = None
+    if isinstance(bundle_hash, str) and len(bundle_hash) == 64:
+        try:
+            bundle_manifest = load_source_bundle_manifest(bundle_hash, bundles_dir=bundles_dir)
+            valid_bundle_relpaths = {f.relpath for f in bundle_manifest.files}
+            manifest_hashes = sorted([f.sha256 for f in bundle_manifest.files])
+            spec_hashes = sorted(doc_hashes) if isinstance(doc_hashes, list) else []
+            if spec_hashes != manifest_hashes:
+                errors.append(
+                    f"official_document_hashes: document hashes do not match bundle entries. "
+                    f"Expected {manifest_hashes}, found {spec_hashes}"
+                )
+        except Exception as e:
+            errors.append(f"source_bundle_hash: failed to verify referenced bundle: {e}")
+
+    # 5. Rules dictionary
     rules_dict = spec_data.get("rules")
     if not isinstance(rules_dict, dict):
         errors.append("rules: must be a dictionary of rule sections")
         return False, errors, None, False
 
-    # Check for missing required sections
-    for req_sec in REQUIRED_RULE_SECTIONS:
-        if req_sec not in rules_dict:
-            errors.append(f"rules.{req_sec}: missing required rule section")
+    # Check for missing and unsupported sections
+    missing_sections = set(REQUIRED_RULE_SECTIONS) - set(rules_dict.keys())
+    if missing_sections:
+        errors.append(f"rules: missing required rule sections: {sorted(list(missing_sections))}")
+
+    unsupported_sections = set(rules_dict.keys()) - set(REQUIRED_RULE_SECTIONS)
+    if unsupported_sections:
+        errors.append(f"rules: unsupported rule sections: {sorted(list(unsupported_sections))}")
 
     allowed_states = {s.value for s in RuleVerificationState}
     all_sections_activation_ready = True
@@ -150,6 +190,15 @@ def validate_game_spec(
         if not isinstance(source_refs, list) or not all(isinstance(s, str) for s in source_refs):
             errors.append(f"rules.{section_name}.source_refs: must be a list of strings")
             source_refs = []
+
+        # Validate source_refs against real bundle relpaths if bundle is available
+        if valid_bundle_relpaths is not None:
+            for sref in source_refs:
+                ref_clean = sref.split("#")[0].split(":")[0].strip()
+                if ref_clean and ref_clean not in valid_bundle_relpaths:
+                    errors.append(
+                        f"rules.{section_name}.source_refs: reference '{sref}' does not match any file in source bundle manifest"
+                    )
 
         test_cov = item_raw.get("test_coverage", [])
         if not isinstance(test_cov, list) or not all(isinstance(t, str) for t in test_cov):
@@ -195,22 +244,23 @@ def validate_game_spec(
         spec_obj = GameSpec(
             schema_version=str(schema_ver),
             competition_name=str(spec_data["competition_name"]),
-            competition_season=str(spec_data["competition_season"]),
+            competition_season=str(spec_data.get("competition_season", "")),
             spec_version=str(spec_data["spec_version"]),
             source_bundle_hash=str(spec_data["source_bundle_hash"]),
-            official_document_hashes=[str(x) for x in (doc_hashes or [])],
+            official_document_hashes=sorted([str(x) for x in (doc_hashes or [])]),
             sdk_version=str(spec_data.get("sdk_version", "")),
             generated_at=str(spec_data.get("generated_at", "")),
             updated_at=str(spec_data.get("updated_at", "")),
             rules=parsed_rules,
         )
 
-    is_activation_ready = is_valid and all_sections_activation_ready
+    is_activation_ready = is_valid and all_sections_activation_ready and len(missing_sections) == 0
     return is_valid, errors, spec_obj, is_activation_ready
 
 
 def load_and_validate_spec(
     spec_path: Path,
+    bundles_dir: Path | None = None,
 ) -> tuple[bool, list[str], GameSpec | None, bool]:
     """Load spec YAML file and validate it."""
     p = Path(spec_path)
@@ -221,6 +271,6 @@ def load_and_validate_spec(
             data = yaml.safe_load(f)
         if not isinstance(data, dict):
             return False, ["Root YAML document must be a dictionary"], None, False
-        return validate_game_spec(data)
+        return validate_game_spec(data, bundles_dir=bundles_dir)
     except Exception as e:
         return False, [f"YAML parsing error: {e}"], None, False

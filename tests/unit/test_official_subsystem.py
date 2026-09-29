@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -9,6 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from battlelab.adapters import get_adapter
+from battlelab.core.models import (
+    BotArtifact,
+    FailureCategory,
+    MatchOutcome,
+    MatchResult,
+    MatchSpec,
+)
+from battlelab.official.adapter import OfficialAdapter
+from battlelab.official.bridge import OfficialEngineBridge
 from battlelab.official.command_runner import OfficialCommandRunner
 from battlelab.official.models import (
     NormalizedReplay,
@@ -117,7 +128,9 @@ def test_spec_init_and_validation(tmp_path: Path):
     assert spec.source_bundle_hash == manifest.bundle_hash
 
     # Validate template spec: structurally valid, but not activation ready because rules are MISSING
-    is_valid, errors, spec_obj, is_ready = validate_game_spec(spec.to_dict())
+    is_valid, errors, spec_obj, is_ready = validate_game_spec(
+        spec.to_dict(), bundles_dir=bundles_dir
+    )
     assert is_valid is True
     assert len(errors) == 0
     assert spec_obj is not None
@@ -366,3 +379,736 @@ def test_normalized_replay_contract():
     assert cmp.raw_replay_equal is True
     assert cmp.gameplay_equal is True
     assert cmp.volatile_metadata_equal is False
+
+
+# ---------------------------------------------------------
+# 6. Phase 3.0.1 Fail-Closed Integrity & Readiness Hardening Regression Tests
+# ---------------------------------------------------------
+def test_tampered_manifest_entry_hash_rejected(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "doc.txt").write_text("Authoritative doc", encoding="utf-8")
+    bundles = tmp_path / "bundles"
+    manifest = ingest_sources(src, bundles_dir=bundles)
+
+    # Tamper with file entry sha256 in source_manifest.json
+    manifest_file = bundles / manifest.bundle_hash / "source_manifest.json"
+    with open(manifest_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["files"][0]["sha256"] = "0" * 64
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    with pytest.raises(ValueError, match="(tampered|mismatch)"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+
+
+def test_tampered_file_count_and_total_size_rejected(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "doc.txt").write_text("Hello", encoding="utf-8")
+    bundles = tmp_path / "bundles"
+    manifest = ingest_sources(src, bundles_dir=bundles)
+    manifest_file = bundles / manifest.bundle_hash / "source_manifest.json"
+
+    # Tamper file_count
+    with open(manifest_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["file_count"] = 999
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    with pytest.raises(ValueError, match="file_count"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+
+    # Tamper total_size_bytes
+    data["file_count"] = 1
+    data["total_size_bytes"] = 9999
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    with pytest.raises(ValueError, match="total_size_bytes"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+
+    # Reject boolean size
+    data["total_size_bytes"] = True
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    with pytest.raises(ValueError, match="total_size_bytes"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+
+
+def test_added_deleted_modified_symlinked_copied_source_files_rejected(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "doc.txt").write_text("Hello copy", encoding="utf-8")
+    bundles = tmp_path / "bundles"
+    manifest = ingest_sources(src, copy_files=True, bundles_dir=bundles)
+    files_dir = bundles / manifest.bundle_hash / "files"
+
+    # 1. Added rogue file
+    rogue = files_dir / "rogue.txt"
+    rogue.write_text("unmanifested", encoding="utf-8")
+    with pytest.raises(ValueError, match="(Extraneous|added)"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+    rogue.unlink()
+
+    # 2. Modified file content
+    (files_dir / "doc.txt").write_text("corrupted content", encoding="utf-8")
+    with pytest.raises(ValueError, match="tampered"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+    (files_dir / "doc.txt").write_text("Hello copy", encoding="utf-8")
+
+    # 3. Deleted file
+    (files_dir / "doc.txt").unlink()
+    with pytest.raises(ValueError, match="Missing"):
+        load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+    (files_dir / "doc.txt").write_text("Hello copy", encoding="utf-8")
+
+    # 4. Symlink rejection
+    sym = files_dir / "sym.txt"
+    try:
+        sym.symlink_to(files_dir / "doc.txt")
+        with pytest.raises(ValueError, match="Symlinks are rejected"):
+            load_source_bundle_manifest(manifest.bundle_hash, bundles_dir=bundles)
+        sym.unlink()
+    except (OSError, NotImplementedError):
+        pass
+
+
+def test_bundle_publication_is_atomic_and_cannot_overwrite(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "rules.txt").write_text("rule text 1", encoding="utf-8")
+    bundles = tmp_path / "bundles"
+
+    m1 = ingest_sources(src, copy_files=True, bundles_dir=bundles)
+    b_dir = bundles / m1.bundle_hash
+    assert b_dir.exists()
+
+    # Ingesting identical data succeeds without clobbering
+    m2 = ingest_sources(src, copy_files=True, bundles_dir=bundles)
+    assert m2.bundle_hash == m1.bundle_hash
+
+    # An existing bundle cannot be silently overwritten with modified/different manifest
+    m_file = b_dir / "source_manifest.json"
+    with open(m_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["files"] = []
+    with open(m_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    with pytest.raises((FileExistsError, ValueError)):
+        ingest_sources(src, copy_files=True, bundles_dir=bundles)
+
+
+def test_caller_provided_non_allowlisted_env_rejected(tmp_path: Path):
+    runner = OfficialCommandRunner()
+    with pytest.raises(ValueError, match="not permitted by allowlist"):
+        runner.run(
+            [sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+            env={"DISALLOWED_CUSTOM_ENV_VAR": "danger"},
+        )
+
+
+def test_invalid_timeout_output_limits_and_nul_env_rejected(tmp_path: Path):
+    runner = OfficialCommandRunner()
+
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        runner.run([sys.executable, "-c", "pass"], cwd=tmp_path, timeout_seconds=True)
+
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        runner.run([sys.executable, "-c", "pass"], cwd=tmp_path, timeout_seconds=-1.0)
+
+    with pytest.raises(ValueError, match="stdout_limit_bytes"):
+        runner.run([sys.executable, "-c", "pass"], cwd=tmp_path, stdout_limit_bytes=True)
+
+    with pytest.raises(ValueError, match="stdout_limit_bytes"):
+        runner.run([sys.executable, "-c", "pass"], cwd=tmp_path, stdout_limit_bytes=-5)
+
+    with pytest.raises(ValueError, match="stderr_limit_bytes"):
+        runner.run([sys.executable, "-c", "pass"], cwd=tmp_path, stderr_limit_bytes=-5)
+
+    with pytest.raises(ValueError, match="NUL character"):
+        runner.run([sys.executable, "-c", "pass"], cwd=tmp_path, env={"PATH": "/usr/bin\0bad"})
+
+
+def test_missing_bridge_capability_fields_remain_false_unknown():
+    class IncompleteProbeBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return False, "Unimplemented"
+
+        def probe_sdk(self):
+            return {}
+
+        def discover_maps(self):
+            return []
+
+        def validate_bot_compatibility(self, bot_artifact):
+            return False, "Unimplemented"
+
+        def build_or_prepare_artifact(self, source_path, output_dir):
+            raise NotImplementedError
+
+        def build_match_command(self, spec, bot_a, bot_b, work_dir):
+            return []
+
+        def parse_match_result(self, spec, command_result, work_dir):
+            raise NotImplementedError
+
+        def locate_replay(self, spec, work_dir):
+            return None
+
+        def parse_replay(self, replay_path):
+            raise NotImplementedError
+
+        def normalize_outcome(self, raw_outcome):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    adapter = OfficialAdapter(bridge=IncompleteProbeBridge())
+    caps = adapter.get_capabilities()
+    assert caps.can_run_local is False
+    assert caps.can_submit is False
+    assert caps.supported_languages == []
+    assert caps.game_version == "UNKNOWN"
+
+
+def test_bridge_cannot_enable_submission():
+    class SubmissionClaimingBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return True, "OK"
+
+        def probe_sdk(self):
+            return {
+                "can_submit": True,  # Attempting to enable submissions!
+                "can_run_local": True,
+                "executable_exists": True,
+                "executable_runnable": True,
+                "sdk_version": "1.0.0",
+            }
+
+        def discover_maps(self):
+            return ["map1"]
+
+        def validate_bot_compatibility(self, bot_artifact):
+            return True, "OK"
+
+        def build_or_prepare_artifact(self, source_path, output_dir):
+            return {}
+
+        def build_match_command(self, spec, bot_a, bot_b, work_dir):
+            return []
+
+        def parse_match_result(self, spec, command_result, work_dir):
+            raise NotImplementedError
+
+        def locate_replay(self, spec, work_dir):
+            return None
+
+        def parse_replay(self, replay_path):
+            raise NotImplementedError
+
+        def normalize_outcome(self, raw_outcome):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    adapter = OfficialAdapter(bridge=SubmissionClaimingBridge())
+    caps = adapter.get_capabilities()
+    assert caps.can_submit is False
+
+
+def test_nonexistent_executable_makes_installation_invalid(tmp_path: Path):
+    class MissingExecutableBridge(OfficialEngineBridge):
+        sdk_path = tmp_path / "nonexistent_engine.exe"
+
+        def validate_spec(self, spec_data):
+            return False, ""
+
+        def probe_sdk(self):
+            return {
+                "executable_exists": False,
+                "executable_runnable": False,
+                "sdk_version": "",
+            }
+
+        def discover_maps(self):
+            return []
+
+        def validate_bot_compatibility(self, bot_artifact):
+            return False, ""
+
+        def build_or_prepare_artifact(self, source_path, output_dir):
+            return {}
+
+        def build_match_command(self, spec, bot_a, bot_b, work_dir):
+            return []
+
+        def parse_match_result(self, spec, command_result, work_dir):
+            raise NotImplementedError
+
+        def locate_replay(self, spec, work_dir):
+            return None
+
+        def parse_replay(self, replay_path):
+            raise NotImplementedError
+
+        def normalize_outcome(self, raw_outcome):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    adapter = OfficialAdapter(bridge=MissingExecutableBridge())
+    ok, msg = adapter.validate_installation()
+    assert ok is False
+    assert "does not exist" in msg
+
+
+def test_every_failed_blocking_check_appears_in_blockers():
+    checker = OfficialReadinessChecker()
+    report = checker.evaluate()
+    failed_blocking_names = [c.name for c in report.checks if c.blocker and not c.passed]
+    assert len(report.blockers) == len(failed_blocking_names)
+    assert set(report.blockers) == set(failed_blocking_names)
+
+
+def test_readiness_remains_false_with_missing_executable_or_zero_maps(tmp_path: Path):
+    class NoExeBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return False, ""
+
+        def probe_sdk(self):
+            return {
+                "executable_exists": False,
+                "executable_runnable": False,
+                "sdk_version": "1.0",
+            }
+
+        def discover_maps(self):
+            return ["map1"]
+
+        def validate_bot_compatibility(self, bot):
+            return False, ""
+
+        def build_or_prepare_artifact(self, s, o):
+            return {}
+
+        def build_match_command(self, s, a, b, w):
+            return []
+
+        def parse_match_result(self, s, c, w):
+            raise NotImplementedError
+
+        def locate_replay(self, s, w):
+            return None
+
+        def parse_replay(self, r):
+            raise NotImplementedError
+
+        def normalize_outcome(self, r):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    checker_no_exe = OfficialReadinessChecker(bridge=NoExeBridge())
+    rep1 = checker_no_exe.evaluate()
+    assert "sdk_executable_exists" in rep1.blockers
+    assert rep1.can_run_local is False
+    assert rep1.ready is False
+
+    class ZeroMapsBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return False, ""
+
+        def probe_sdk(self):
+            return {
+                "executable_exists": True,
+                "executable_runnable": True,
+                "sdk_version": "1.0",
+            }
+
+        def discover_maps(self):
+            return []  # Zero maps!
+
+        def validate_bot_compatibility(self, bot):
+            return False, ""
+
+        def build_or_prepare_artifact(self, s, o):
+            return {}
+
+        def build_match_command(self, s, a, b, w):
+            return []
+
+        def parse_match_result(self, s, c, w):
+            raise NotImplementedError
+
+        def locate_replay(self, s, w):
+            return None
+
+        def parse_replay(self, r):
+            raise NotImplementedError
+
+        def normalize_outcome(self, r):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    checker_zero_maps = OfficialReadinessChecker(bridge=ZeroMapsBridge())
+    rep2 = checker_zero_maps.evaluate()
+    assert "map_discovery_succeeds" in rep2.blockers
+    assert rep2.can_run_local is False
+    assert rep2.ready is False
+
+
+def test_documented_rules_insufficient_all_mandatory_must_be_test_verified(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "rules.pdf").write_text("doc", encoding="utf-8")
+    bundles = tmp_path / "bundles"
+    manifest = ingest_sources(src, bundles_dir=bundles)
+
+    from battlelab.official.spec import REQUIRED_RULE_SECTIONS
+
+    spec_data = {
+        "schema_version": "1.0.0",
+        "competition_name": "Battlecode",
+        "competition_season": "",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": manifest.bundle_hash,
+        "official_document_hashes": [manifest.files[0].sha256],
+        "rules": {
+            k: {
+                "meaning": f"Rule {k}",
+                "source_refs": ["rules.pdf#p1"],
+                "verification_state": "DOCUMENTED",  # DOCUMENTED, not TEST_VERIFIED
+            }
+            for k in REQUIRED_RULE_SECTIONS
+        },
+    }
+    valid, errors, spec_obj, is_ready = validate_game_spec(spec_data, bundles_dir=bundles)
+    assert valid is True
+    assert is_ready is False  # Cannot be ready when only DOCUMENTED!
+
+    spec_file = tmp_path / "spec.yaml"
+    import yaml
+
+    with open(spec_file, "w", encoding="utf-8") as f:
+        yaml.safe_dump(spec_data, f)
+
+    checker = OfficialReadinessChecker(spec_path=spec_file, source_bundle_hash=manifest.bundle_hash)
+    report = checker.evaluate()
+    assert "mandatory_rules_test_verified" in report.blockers
+    assert report.can_run_local is False
+    assert report.ready is False
+
+
+def test_spec_bundle_hash_mismatch_and_invalid_source_references_rejected(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "rules.txt").write_text("rule content", encoding="utf-8")
+    bundles = tmp_path / "bundles"
+    manifest = ingest_sources(src, bundles_dir=bundles)
+
+    from battlelab.official.spec import REQUIRED_RULE_SECTIONS
+
+    # Case A: Mismatched bundle hash
+    spec_bad_hash = {
+        "schema_version": "1.0.0",
+        "competition_name": "Battlecode",
+        "competition_season": "",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": "0" * 64,  # Mismatched hash!
+        "official_document_hashes": [manifest.files[0].sha256],
+        "rules": {
+            k: {
+                "meaning": f"Rule {k}",
+                "source_refs": ["rules.txt"],
+                "verification_state": "TEST_VERIFIED",
+                "test_coverage": ["test_rule"],
+            }
+            for k in REQUIRED_RULE_SECTIONS
+        },
+    }
+    valid_a, errors_a, _, _ = validate_game_spec(spec_bad_hash, bundles_dir=bundles)
+    assert valid_a is False
+    assert any("source_bundle_hash" in e for e in errors_a)
+
+    # Case B: Invalid source reference (file does not exist in bundle)
+    spec_bad_ref = {
+        "schema_version": "1.0.0",
+        "competition_name": "Battlecode",
+        "competition_season": "",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": manifest.bundle_hash,
+        "official_document_hashes": [manifest.files[0].sha256],
+        "rules": {
+            k: {
+                "meaning": f"Rule {k}",
+                "source_refs": ["fabricated_doc.pdf#sec1"],  # Not in manifest!
+                "verification_state": "TEST_VERIFIED",
+                "test_coverage": ["test_rule"],
+            }
+            for k in REQUIRED_RULE_SECTIONS
+        },
+    }
+    valid_b, errors_b, _, _ = validate_game_spec(spec_bad_ref, bundles_dir=bundles)
+    assert valid_b is False
+    assert any("does not match any file in source bundle manifest" in e for e in errors_b)
+
+
+def test_self_reported_bridge_verification_flags_cannot_pass_readiness(tmp_path: Path):
+    class BoastingBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return True, "OK"
+
+        def probe_sdk(self):
+            return {
+                "executable_exists": True,
+                "executable_runnable": True,
+                "sdk_version": "1.0.0",
+                "build_verified": True,  # Self-reported flags!
+                "match_verified": True,
+                "replay_verified": True,
+                "determinism_verified": True,
+                "can_run_local": True,
+            }
+
+        def discover_maps(self):
+            return ["map1"]
+
+        def validate_bot_compatibility(self, bot):
+            return True, "OK"
+
+        def build_or_prepare_artifact(self, s, o):
+            raise RuntimeError("Execution actually fails!")
+
+        def build_match_command(self, s, a, b, w):
+            return []
+
+        def parse_match_result(self, s, c, w):
+            raise NotImplementedError
+
+        def locate_replay(self, s, w):
+            return None
+
+        def parse_replay(self, r):
+            raise NotImplementedError
+
+        def normalize_outcome(self, r):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    checker = OfficialReadinessChecker(bridge=BoastingBridge())
+    report = checker.evaluate()
+    # The checker executes build check or fails prerequisites, ignoring self-reported booleans
+    assert report.can_run_local is False
+    assert report.ready is False
+
+
+def test_non_zero_engine_exit_always_produces_infrastructure_failure(tmp_path: Path):
+    class CrashingMatchBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return True, ""
+
+        def probe_sdk(self):
+            return {
+                "executable_exists": True,
+                "executable_runnable": True,
+                "sdk_version": "1.0",
+            }
+
+        def discover_maps(self):
+            return ["map1"]
+
+        def validate_bot_compatibility(self, bot):
+            return True, ""
+
+        def build_or_prepare_artifact(self, s, o):
+            return {}
+
+        def build_match_command(self, s, a, b, w):
+            return [sys.executable, "-c", "import sys; sys.exit(42)"]
+
+        def parse_match_result(self, s, c, w):
+            # Attempt to return a win despite exit code 42
+            return MatchResult(
+                match_id="m1",
+                outcome=MatchOutcome.WIN_A,
+                winner="A",
+                score_a=100.0,
+                score_b=0.0,
+                turns_played=10,
+                duration_ms=1.0,
+            )
+
+        def locate_replay(self, s, w):
+            return None
+
+        def parse_replay(self, r):
+            raise NotImplementedError
+
+        def normalize_outcome(self, r):
+            return MatchOutcome.WIN_A
+
+    adapter = OfficialAdapter(bridge=CrashingMatchBridge())
+    bot = BotArtifact("b", "B", "bots/b", "python", None, False, "h")
+    spec = MatchSpec("m", "official", "1.0", "b", "b", "map1", 1)
+
+    res = adapter.run_local_match(spec, bot, bot, tmp_path)
+    assert res.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE
+    assert res.winner is None
+    assert res.failure_classification is not None
+    assert res.failure_classification.category == FailureCategory.ENGINE_CRASH
+
+
+def test_malformed_replay_always_produces_infrastructure_or_corruption_failure(tmp_path: Path):
+    class CorruptReplayBridge(OfficialEngineBridge):
+        def validate_spec(self, spec_data):
+            return True, ""
+
+        def probe_sdk(self):
+            return {
+                "executable_exists": True,
+                "executable_runnable": True,
+                "sdk_version": "1.0",
+            }
+
+        def discover_maps(self):
+            return ["map1"]
+
+        def validate_bot_compatibility(self, bot):
+            return True, ""
+
+        def build_match_command(self, s, a, b, w):
+            return [sys.executable, "-c", "pass"]
+
+        def build_or_prepare_artifact(self, s, o):
+            return {}
+
+        def parse_match_result(self, s, c, w):
+            return MatchResult(
+                match_id="m1",
+                outcome=MatchOutcome.WIN_A,
+                winner="A",
+                score_a=100.0,
+                score_b=0.0,
+                turns_played=10,
+                duration_ms=1.0,
+            )
+
+        def locate_replay(self, s, w):
+            corrupt = w / "corrupt_replay.json"
+            corrupt.write_text("{invalid json corrupt", encoding="utf-8")
+            return corrupt
+
+        def parse_replay(self, r):
+            raise json.JSONDecodeError("Corrupted replay", "", 0)
+
+        def normalize_outcome(self, r):
+            return MatchOutcome.WIN_A
+
+    adapter = OfficialAdapter(bridge=CorruptReplayBridge())
+    bot = BotArtifact("b", "B", "bots/b", "python", None, False, "h")
+    spec = MatchSpec("m", "official", "1.0", "b", "b", "map1", 1)
+
+    res = adapter.run_local_match(spec, bot, bot, tmp_path)
+    assert res.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE
+    assert res.winner is None
+    assert res.failure_classification is not None
+    assert res.failure_classification.category == FailureCategory.REPLAY_CORRUPTION
+
+
+def test_gameplay_identical_replays_with_different_raw_hashes():
+    r1 = NormalizedReplay(
+        schema_version="1.0.0",
+        adapter_name="official",
+        adapter_version="1.0.0",
+        game_version="v1",
+        map_id="map_a",
+        seed=123,
+        participants={"A": "botA", "B": "botB"},
+        outcome="WIN_A",
+        scores={"A": 10.0, "B": 5.0},
+        turn_count=20,
+        events=[{"t": 1, "e": "move"}],
+        raw_replay_hash="a" * 64,
+        source_metadata={"timestamp": "2026-09-29T10:00:00Z"},
+    )
+    r2 = NormalizedReplay(
+        schema_version="1.0.0",
+        adapter_name="official",
+        adapter_version="1.0.0",
+        game_version="v1",
+        map_id="map_a",
+        seed=123,
+        participants={"A": "botA", "B": "botB"},
+        outcome="WIN_A",
+        scores={"A": 10.0, "B": 5.0},
+        turn_count=20,
+        events=[{"t": 1, "e": "move"}],
+        raw_replay_hash="b" * 64,  # Different raw hash!
+        source_metadata={"timestamp": "2026-09-29T11:00:00Z"},
+    )
+    # Normalized gameplay canonical hashes must be equal despite raw hash difference
+    assert r1.canonical_hash() == r2.canonical_hash()
+    cmp = compare_replay_determinism(r1, r2)
+    assert cmp.raw_replay_equal is False
+    assert cmp.gameplay_equal is True
+
+
+def test_default_production_state_and_adversarial_configured_bridge_fail_closed():
+    # 1. Default production adapter
+    default_adapter = get_adapter("official")
+    ok, _ = default_adapter.validate_installation()
+    assert ok is False
+    caps = default_adapter.get_capabilities()
+    assert caps.can_run_local is False
+    assert caps.can_submit is False
+
+    prod_checker = OfficialReadinessChecker()
+    prod_report = prod_checker.evaluate()
+    assert prod_report.ready is False
+    assert prod_report.can_run_local is False
+    assert prod_report.can_submit is False
+
+    # 2. Adversarial configured bridge
+    class AdversarialBridge(OfficialEngineBridge):
+        def validate_spec(self, s):
+            return True, "OK"
+
+        def probe_sdk(self):
+            return {
+                "can_submit": True,
+                "can_run_local": True,
+                "executable_exists": True,
+                "executable_runnable": True,
+                "sdk_version": "6.6.6",
+                "build_verified": True,
+                "match_verified": True,
+                "replay_verified": True,
+                "determinism_verified": True,
+            }
+
+        def discover_maps(self):
+            return ["map1"]
+
+        def validate_bot_compatibility(self, b):
+            return True, "OK"
+
+        def build_or_prepare_artifact(self, s, o):
+            return {}
+
+        def build_match_command(self, s, a, b, w):
+            return []
+
+        def parse_match_result(self, s, c, w):
+            raise NotImplementedError
+
+        def locate_replay(self, s, w):
+            return None
+
+        def parse_replay(self, r):
+            raise NotImplementedError
+
+        def normalize_outcome(self, r):
+            return MatchOutcome.INFRASTRUCTURE_FAILURE
+
+    adv_adapter = OfficialAdapter(bridge=AdversarialBridge())
+    adv_caps = adv_adapter.get_capabilities()
+    assert adv_caps.can_submit is False  # Cannot enable submissions
+
+    adv_checker = OfficialReadinessChecker(bridge=AdversarialBridge())
+    adv_report = adv_checker.evaluate()
+    assert adv_report.ready is False
+    assert adv_report.can_run_local is False
+    assert adv_report.can_submit is False

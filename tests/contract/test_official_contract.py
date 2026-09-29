@@ -44,6 +44,13 @@ class FakeOfficialBridge(OfficialEngineBridge):
         return True, "Synthetic spec valid"
 
     def probe_sdk(self) -> dict[str, Any]:
+        if not self.sdk_path.exists():
+            return {
+                "sdk_name": "SyntheticTestEngine",
+                "sdk_version": "",
+                "executable_exists": False,
+                "executable_runnable": False,
+            }
         res = self.runner.run(
             [sys.executable, str(self.sdk_path), "probe"],
             cwd=self.sdk_path.parent,
@@ -433,8 +440,7 @@ def test_fake_official_readiness_with_synthetic_bridge():
     checker = OfficialReadinessChecker(bridge=bridge)
     report = checker.evaluate()
 
-    # Synthetic SDK allows can_run_local=True because probe, build, match, replay, determinism all succeed!
-    assert report.can_run_local is True
-    # But overall ready is still False because source bundle and minimal official bot don't exist
+    # Fail-closed: can_run_local and ready are False because source bundle and minimal official bot don't exist
+    assert report.can_run_local is False
     assert report.ready is False
     assert report.can_submit is False

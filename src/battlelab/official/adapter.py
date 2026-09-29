@@ -51,11 +51,39 @@ class OfficialAdapter(GameAdapter):
         if isinstance(self.bridge, UnconfiguredOfficialBridge):
             return (
                 False,
-                "Official competition SDK not ingested. See docs/day_zero_rule_ingestion.md.",
+                "Official competition SDK not ingested or configured. See docs/day_zero_rule_ingestion.md.",
             )
         try:
             probe = self.bridge.probe_sdk()
-            return True, f"Official SDK validated: {probe.get('sdk_version', 'unknown')}"
+            if not isinstance(probe, dict):
+                return False, "probe_sdk() must return a dictionary."
+
+            # 1. Executable exists
+            if hasattr(self.bridge, "sdk_path"):
+                sdk_p = Path(getattr(self.bridge, "sdk_path"))
+                if not sdk_p.exists():
+                    return False, f"Official SDK executable does not exist: {sdk_p}"
+            exe_exists = bool(probe.get("executable_exists", False))
+            if not exe_exists:
+                return False, "Official SDK executable does not exist."
+
+            # 2. Executable runnable
+            exe_runnable = bool(probe.get("executable_runnable", False))
+            if not exe_runnable:
+                return False, "Official SDK executable is not runnable."
+
+            # 3. Non-empty version obtained from actual execution
+            sdk_version = probe.get("sdk_version")
+            if (
+                not sdk_version
+                or not isinstance(sdk_version, str)
+                or not sdk_version.strip()
+                or sdk_version.strip().lower()
+                in ("unknown", "missing", "unspecified", "unreleased")
+            ):
+                return False, "Official SDK version could not be determined from actual execution."
+
+            return True, f"Official SDK validated: {sdk_version.strip()}"
         except Exception as e:
             return False, f"Official SDK validation failed: {e}"
 
@@ -69,19 +97,22 @@ class OfficialAdapter(GameAdapter):
                 can_list_matches=False,
                 supported_languages=[],
                 adapter_version=self.version,
-                game_version="UNRELEASED_AUTUMN_COMPETITION",
+                game_version="UNKNOWN",
             )
         try:
             probe = self.bridge.probe_sdk()
+            valid_install, _ = self.validate_installation()
+            # can_run_local requires valid installation and probe evidence
+            can_run_local = valid_install and bool(probe.get("can_run_local", False))
             return Capability(
-                can_run_local=bool(probe.get("can_run_local", True)),
-                can_run_remote=bool(probe.get("can_run_remote", False)),
-                can_submit=bool(probe.get("can_submit", False)),
+                can_run_local=can_run_local,
+                can_run_remote=False,
+                can_submit=False,  # Unconditionally false until explicit audited unlock mechanism exists
                 can_fetch_replays=bool(probe.get("can_fetch_replays", False)),
                 can_list_matches=bool(probe.get("can_list_matches", False)),
-                supported_languages=probe.get("supported_languages", ["python"]),
+                supported_languages=list(probe.get("supported_languages", [])),
                 adapter_version=self.version,
-                game_version=probe.get("game_version", "official-autumn-2026"),
+                game_version=str(probe.get("game_version", "UNKNOWN")),
             )
         except Exception:
             return Capability(
@@ -92,7 +123,7 @@ class OfficialAdapter(GameAdapter):
                 can_list_matches=False,
                 supported_languages=[],
                 adapter_version=self.version,
-                game_version="ERROR_PROBING_SDK",
+                game_version="UNKNOWN",
             )
 
     def discover_maps(self) -> list[str]:
@@ -120,7 +151,6 @@ class OfficialAdapter(GameAdapter):
         cmd = self.bridge.build_match_command(spec, bot_a, bot_b, work_dir)
 
         # 3. Run external process
-
         timeout_sec = max(1.0, spec.time_limit_ms / 1000.0)
         cmd_result = self.command_runner.run(
             argv=cmd,
@@ -129,7 +159,7 @@ class OfficialAdapter(GameAdapter):
             cancel_event=cancel_event,
         )
 
-        # 3. Handle abnormal process outcomes
+        # 4. Handle abnormal process outcomes
         if cmd_result.timed_out:
             return MatchResult(
                 match_id=spec.match_id,
@@ -166,44 +196,72 @@ class OfficialAdapter(GameAdapter):
                 ),
             )
 
-        # 4. Parse result via bridge
+        # Non-zero engine exit MUST always produce INFRASTRUCTURE_FAILURE
         if cmd_result.exit_code != 0:
-            # Check if bridge can parse exit code or error output
-            try:
-                res = self.bridge.parse_match_result(spec, cmd_result, work_dir)
-            except Exception:
-                return MatchResult(
-                    match_id=spec.match_id,
-                    outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
-                    winner=None,
-                    score_a=0.0,
-                    score_b=0.0,
-                    turns_played=0,
-                    duration_ms=cmd_result.duration_ms,
-                    replay_path=None,
-                    replay_hash=None,
-                    failure_classification=FailureClassification(
-                        category=FailureCategory.ENGINE_CRASH,
-                        culprit="engine",
-                        evidence=f"Official engine exited with code {cmd_result.exit_code}: {cmd_result.stderr[:500]}",
-                    ),
-                )
-        else:
-            res = self.bridge.parse_match_result(spec, cmd_result, work_dir)
-
-        # 5. Discover and parse replay
-        replay_path = self.bridge.locate_replay(spec, work_dir)
-        if replay_path and replay_path.is_file():
-            res.replay_path = str(replay_path)
-            res.replay_hash = hash_file(replay_path)
-            try:
-                _ = self.bridge.parse_replay(replay_path)
-            except Exception as e:
-                res.failure_classification = FailureClassification(
-                    category=FailureCategory.REPLAY_CORRUPTION,
+            return MatchResult(
+                match_id=spec.match_id,
+                outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                winner=None,
+                score_a=0.0,
+                score_b=0.0,
+                turns_played=0,
+                duration_ms=cmd_result.duration_ms,
+                replay_path=None,
+                replay_hash=None,
+                failure_classification=FailureClassification(
+                    category=FailureCategory.ENGINE_CRASH,
                     culprit="engine",
-                    evidence=f"Failed to parse official replay: {e}",
-                )
+                    evidence=f"Official engine non-zero exit code {cmd_result.exit_code}: {cmd_result.stderr[:500]}",
+                ),
+            )
+
+        # 5. Parse result via bridge
+        try:
+            res = self.bridge.parse_match_result(spec, cmd_result, work_dir)
+        except Exception as e:
+            return MatchResult(
+                match_id=spec.match_id,
+                outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                winner=None,
+                score_a=0.0,
+                score_b=0.0,
+                turns_played=0,
+                duration_ms=cmd_result.duration_ms,
+                replay_path=None,
+                replay_hash=None,
+                failure_classification=FailureClassification(
+                    category=FailureCategory.UNKNOWN_INFRASTRUCTURE,
+                    culprit="engine",
+                    evidence=f"Failed to parse official match result: {e}",
+                ),
+            )
+
+        # 6. Discover and parse replay
+        replay_path = self.bridge.locate_replay(spec, work_dir)
+        if not replay_path or not Path(replay_path).is_file():
+            res.outcome = MatchOutcome.INFRASTRUCTURE_FAILURE
+            res.winner = None
+            res.failure_classification = FailureClassification(
+                category=FailureCategory.REPLAY_CORRUPTION,
+                culprit="engine",
+                evidence=f"Replay file not found or not a regular file: {replay_path}",
+            )
+            return res
+
+        r_path = Path(replay_path)
+        res.replay_path = str(r_path)
+        res.replay_hash = hash_file(r_path)
+        try:
+            _ = self.bridge.parse_replay(r_path)
+        except Exception as e:
+            res.outcome = MatchOutcome.INFRASTRUCTURE_FAILURE
+            res.winner = None
+            res.failure_classification = FailureClassification(
+                category=FailureCategory.REPLAY_CORRUPTION,
+                culprit="engine",
+                evidence=f"Failed to parse official replay: {e}",
+            )
+            return res
 
         return res
 

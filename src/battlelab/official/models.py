@@ -23,11 +23,40 @@ class SourceFileEntry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceFileEntry:
+        if not isinstance(data, dict):
+            raise TypeError("SourceFileEntry data must be a dictionary")
+        relpath = data.get("relpath")
+        if not isinstance(relpath, str):
+            raise TypeError("relpath must be a string")
+        if not relpath or relpath.startswith("/") or "\\" in relpath or ":" in relpath:
+            raise ValueError(f"Invalid non-POSIX or absolute relpath: {relpath!r}")
+        parts = relpath.split("/")
+        if any(p in ("", ".", "..") for p in parts):
+            raise ValueError(f"Invalid path segments in relpath: {relpath!r}")
+
+        sha256 = data.get("sha256")
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or not all(c in "0123456789abcdef" for c in sha256)
+        ):
+            raise ValueError(f"sha256 must be 64 lowercase hex characters: {sha256!r}")
+
+        size_bytes = data.get("size_bytes")
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
+            raise ValueError(
+                f"size_bytes must be a non-negative integer, not boolean: {size_bytes!r}"
+            )
+
+        media_type = data.get("media_type", "application/octet-stream")
+        if not isinstance(media_type, str):
+            raise TypeError(f"media_type must be a string: {media_type!r}")
+
         return cls(
-            relpath=str(data["relpath"]),
-            sha256=str(data["sha256"]),
-            size_bytes=int(data["size_bytes"]),
-            media_type=str(data.get("media_type", "application/octet-stream")),
+            relpath=relpath,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            media_type=media_type,
         )
 
 
@@ -56,14 +85,80 @@ class SourceBundleManifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SourceBundleManifest:
+        if not isinstance(data, dict):
+            raise TypeError("SourceBundleManifest data must be a dictionary")
+        schema_version = data.get("schema_version", "1.0.0")
+        if schema_version != "1.0.0" or not isinstance(schema_version, str):
+            raise ValueError(f"Unsupported schema_version: {schema_version!r}")
+
+        bundle_hash = data.get("bundle_hash")
+        if (
+            not isinstance(bundle_hash, str)
+            or len(bundle_hash) != 64
+            or not all(c in "0123456789abcdef" for c in bundle_hash)
+        ):
+            raise ValueError(f"bundle_hash must be 64 lowercase hex characters: {bundle_hash!r}")
+
+        source_path = data.get("source_path", "")
+        if not isinstance(source_path, str):
+            raise TypeError(f"source_path must be a string: {source_path!r}")
+        if source_path.startswith("/") or "\\" in source_path or ":" in source_path:
+            raise ValueError(
+                f"source_path must not be a machine-specific absolute path: {source_path!r}"
+            )
+
+        created_at = data.get("created_at", "")
+        if not isinstance(created_at, str):
+            raise TypeError(f"created_at must be a string: {created_at!r}")
+
+        file_count = data.get("file_count")
+        if isinstance(file_count, bool) or not isinstance(file_count, int) or file_count < 0:
+            raise ValueError(
+                f"file_count must be a non-negative integer, not boolean: {file_count!r}"
+            )
+
+        total_size_bytes = data.get("total_size_bytes")
+        if (
+            isinstance(total_size_bytes, bool)
+            or not isinstance(total_size_bytes, int)
+            or total_size_bytes < 0
+        ):
+            raise ValueError(
+                f"total_size_bytes must be a non-negative integer, not boolean: {total_size_bytes!r}"
+            )
+
+        raw_files = data.get("files")
+        if not isinstance(raw_files, list):
+            raise TypeError("files must be a list of file entries")
+
+        files = [
+            f if isinstance(f, SourceFileEntry) else SourceFileEntry.from_dict(f) for f in raw_files
+        ]
+
+        # Check unique relpaths
+        seen_rel = set()
+        for f in files:
+            if f.relpath in seen_rel:
+                raise ValueError(f"Duplicate relpath in manifest: {f.relpath!r}")
+            seen_rel.add(f.relpath)
+
+        if file_count != len(files):
+            raise ValueError(f"file_count ({file_count}) does not match len(files) ({len(files)})")
+
+        computed_total_size = sum(f.size_bytes for f in files)
+        if total_size_bytes != computed_total_size:
+            raise ValueError(
+                f"total_size_bytes ({total_size_bytes}) does not match sum of file sizes ({computed_total_size})"
+            )
+
         return cls(
-            schema_version=str(data.get("schema_version", "1.0.0")),
-            bundle_hash=str(data["bundle_hash"]),
-            source_path=str(data.get("source_path", "")),
-            created_at=str(data.get("created_at", "")),
-            file_count=int(data.get("file_count", 0)),
-            total_size_bytes=int(data.get("total_size_bytes", 0)),
-            files=[SourceFileEntry.from_dict(f) for f in data.get("files", [])],
+            schema_version=schema_version,
+            bundle_hash=bundle_hash,
+            source_path=source_path,
+            created_at=created_at,
+            file_count=file_count,
+            total_size_bytes=total_size_bytes,
+            files=files,
         )
 
 
@@ -191,7 +286,18 @@ class CommandResult:
 
 @dataclass
 class NormalizedReplay:
-    """Rule-independent normalized replay representation."""
+    """Rule-independent normalized replay representation.
+
+    Determinism Separation Semantics:
+    - raw_replay_hash: SHA-256 checksum of raw byte content of the replay file on disk.
+      Captures byte-level serialization differences (formatting, key order, whitespace).
+    - canonical_hash(): Deterministic SHA-256 hash of normalized gameplay data.
+      Strictly EXCLUDES raw_replay_hash and volatile source_metadata. Two replays with
+      identical gameplay moves and events will produce identical canonical hashes even
+      if their raw file bytes differ.
+    - source_metadata: Volatile engine execution telemetry, timestamps, and diagnostics
+      that do not impact gameplay mechanics.
+    """
 
     schema_version: str = "1.0.0"
     adapter_name: str = ""
@@ -213,7 +319,10 @@ class NormalizedReplay:
         return max(self.turn_count, len(self.events))
 
     def canonical_hash(self) -> str:
-        """Hash parsed normalized gameplay data."""
+        """Hash parsed normalized gameplay data.
+
+        Excludes raw_replay_hash and volatile source_metadata.
+        """
         payload = {
             "schema_version": self.schema_version,
             "adapter_name": self.adapter_name,
@@ -226,7 +335,6 @@ class NormalizedReplay:
             "scores": self.scores,
             "turn_count": self.turn_count,
             "events": self.events,
-            "raw_replay_hash": self.raw_replay_hash,
         }
         return hash_dict(payload)
 
@@ -273,7 +381,7 @@ def compare_replay_determinism(
     """Compare two normalized replays distinguishing raw bytes, gameplay, and metadata."""
     differences: list[str] = []
 
-    # 1. Raw replay equality
+    # 1. Raw replay equality (byte level)
     raw_equal = bool(
         replay_a.raw_replay_hash
         and replay_b.raw_replay_hash
@@ -284,28 +392,26 @@ def compare_replay_determinism(
             f"Raw replay hash difference: {replay_a.raw_replay_hash} != {replay_b.raw_replay_hash}"
         )
 
-    # 2. Gameplay equality
-    gameplay_equal = True
-    if replay_a.outcome != replay_b.outcome:
-        gameplay_equal = False
-        differences.append(f"Outcome difference: {replay_a.outcome} != {replay_b.outcome}")
-    if replay_a.scores != replay_b.scores:
-        gameplay_equal = False
-        differences.append(f"Scores difference: {replay_a.scores} != {replay_b.scores}")
-    if replay_a.turn_count != replay_b.turn_count:
-        gameplay_equal = False
-        differences.append(f"Turn count difference: {replay_a.turn_count} != {replay_b.turn_count}")
-    if replay_a.map_id != replay_b.map_id or replay_a.seed != replay_b.seed:
-        gameplay_equal = False
-        differences.append(
-            f"Context difference: map({replay_a.map_id} vs {replay_b.map_id}), "
-            f"seed({replay_a.seed} vs {replay_b.seed})"
-        )
-    if replay_a.events != replay_b.events:
-        gameplay_equal = False
-        differences.append(
-            f"Events length or content difference ({len(replay_a.events)} vs {len(replay_b.events)})"
-        )
+    # 2. Gameplay equality (canonical gameplay hash)
+    gameplay_equal = replay_a.canonical_hash() == replay_b.canonical_hash()
+    if not gameplay_equal:
+        if replay_a.outcome != replay_b.outcome:
+            differences.append(f"Outcome difference: {replay_a.outcome} != {replay_b.outcome}")
+        if replay_a.scores != replay_b.scores:
+            differences.append(f"Scores difference: {replay_a.scores} != {replay_b.scores}")
+        if replay_a.turn_count != replay_b.turn_count:
+            differences.append(
+                f"Turn count difference: {replay_a.turn_count} != {replay_b.turn_count}"
+            )
+        if replay_a.map_id != replay_b.map_id or replay_a.seed != replay_b.seed:
+            differences.append(
+                f"Context difference: map({replay_a.map_id} vs {replay_b.map_id}), "
+                f"seed({replay_a.seed} vs {replay_b.seed})"
+            )
+        if replay_a.events != replay_b.events:
+            differences.append(
+                f"Events difference ({len(replay_a.events)} vs {len(replay_b.events)})"
+            )
 
     # 3. Volatile metadata equality
     volatile_equal = replay_a.source_metadata == replay_b.source_metadata

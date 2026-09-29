@@ -1,8 +1,15 @@
 # Battlelab Project Status
 
 ## Status Summary
-- **Phase**: Phase 3.0 Complete (Pre-Rule Official Integration Readiness: Authoritative Source Ingestion, Typed & Source-Backed Game Specification, Secure Official Command Runner, Generic Orchestration with Rule Bridge Separation, Normalized Replay Contract, Fail-Closed Readiness & Capability Reporting, Synthetic Fake SDK Test Harness, Day-0 Runbooks)
-- **Current Milestone**: Full pre-rule official integration readiness established without inventing competition rules, mechanics, or endpoints. Platform provides auditable source document ingestion (`battlelab official ingest`), typed 23-rule source-backed game specification (`battlelab official spec`), secure subprocess execution with bounded capture and process-tree cleanup (`OfficialCommandRunner`), decoupled rule bridge architecture (`OfficialEngineBridge`), normalized replay model with determinism comparison (`NormalizedReplay`), fail-closed readiness assessment (`battlelab official readiness`), synthetic test SDK harness (`tests/fixtures/synthetic_sdk/`), and complete Day-0 runbooks. Production adapter remains fail-closed (`ready: false`, `can_run_local: false`, `can_submit: false`).
+- **Phase**: Phase 3.0.1 Complete (Fail-Closed Integrity and Readiness Hardening: Recomputed Canonical Source Bundle Hashes, File Verification, Atomic Publication with Overwrite Protection, Redacted Sanitized Command Runner, Invariant Fail-Closed Readiness & Blocker Accumulation, Strict 23-Rule Schema Verification, Gameplay Replay Determinism Separation, 18 Named Regression Tests)
+- **Current Milestone**: Full fail-closed integrity and readiness hardening established across all pre-rule official subsystem interfaces. Platform guarantees:
+  1. Source bundles recompute canonical hash on load; verify exact regular file sets, sizes, and 64-char lowercase hex SHA-256 hashes; publish atomically through temporary sibling directories; and forbid destructive overwrites.
+  2. Subprocess command runner strictly validates allowed environment variables, rejects NUL characters, validates finite non-negative timeouts and output limits, and guarantees secret redaction even in error messages.
+  3. Official adapter and capability derivation default missing evidence to false/unknown, enforce real runnable executable verification, lock `can_submit` to `False`, classify non-zero exit as `ENGINE_CRASH`, and classify missing/malformed replays as `REPLAY_CORRUPTION`.
+  4. Game specification is bound to source bundles, validates all 23 mandatory rules as `TEST_VERIFIED` for activation readiness, and rejects invented defaults.
+  5. Readiness checker mechanically surfaces all failed blocking checks in `blockers`, enforces all prerequisites for `can_run_local`, executes actual isolated match runs rather than trusting self-reported flags, and resolves source bundles strictly by hash or spec.
+  6. Replay canonical hashing separates gameplay actions and scores from byte-level metadata and serialization artifacts.
+  7. 113 automated tests passing (including all 18 Phase 3.0.1 named regression tests).
 - **Engine Status**: 
   - `MockAdapter`: Real subprocess execution over line-delimited JSON stdin/stdout protocol strictly from frozen, cryptographically verified artifact snapshots (`data/artifacts/<id>/`). Produces normalized replay contracts.
   - `OfficialAdapter`: Generic orchestration adapter for official competition games, decoupled from rules via `OfficialEngineBridge` and `OfficialCommandRunner`. Defaults to `UnconfiguredOfficialBridge` (fail-closed, non-operational until Day 0).
@@ -44,7 +51,7 @@
 - [x] CLI `--entrypoint` Option: Added `--entrypoint` argument to `battlelab bot register` with validation.
 - [x] Isolated & Repeatable E2E Demonstration (`scripts/demonstrate_e2e.py`): Fully isolated via `tempfile.TemporaryDirectory()`, tests pause (`INTERRUPTED 2/8`) and resume (`COMPLETED 8/8`), with zero repository mutation.
 - [x] GitHub Actions CI Matrix: Complete matrix workflow (`.github/workflows/ci.yml`) on Ubuntu/Windows for Python 3.11 and 3.12 running ruff format, ruff check, mypy, pytest, demonstrate_e2e twice, CLI tournament, and working tree cleanliness check.
-- [x] Complete automated test suite (95 unit, integration, and contract tests including Phase 3.0 official integration tests).
+- [x] Complete automated test suite (113 unit, integration, and contract tests including all 18 Phase 3.0.1 hardening regression tests).
 
 ## Currently Verified Behaviors
 - `battlelab doctor` accurately diagnoses environment, data directories, active champion, adapter readiness, and OS memory limit capabilities.
@@ -62,7 +69,8 @@
 - Segment evidence enforced: minimum segment sample size threshold of 1 enforced across seeds, maps, opponent groups, and sides; threshold 0 disables check; non-negative integer type validation.
 - Promotion gates verified: blocks failing bots, accepts statistical improvements, requires positive lower CI, verifies runtime headroom, enforces opponent weights, checks pre-promotion integrity, audits rollbacks, and uses recorded experiment configuration snapshots.
 - End-to-end demonstration script passes all 12 steps cleanly twice in clean temporary directories without repository mutation.
-- Official pre-rule readiness verified: source ingestion (`battlelab official ingest`), typed 23-rule specification validation (`battlelab official spec`), secure command execution (`OfficialCommandRunner`), decoupled bridge architecture (`OfficialEngineBridge`), normalized replay model (`NormalizedReplay`), and fail-closed readiness assessment (`battlelab official readiness`).
+- Official pre-rule readiness and fail-closed hardening verified: source ingestion (`battlelab official ingest`), typed 23-rule specification validation (`battlelab official spec`), secure command execution (`OfficialCommandRunner`), decoupled bridge architecture (`OfficialEngineBridge`), normalized replay model (`NormalizedReplay`), and fail-closed readiness assessment (`battlelab official readiness`).
+- All 18 Phase 3.0.1 hardening regression tests passing.
 
 ## Remaining Work
 - Ingestion of authoritative official rulebook and SDK (upon official release).
@@ -80,13 +88,13 @@
 - `python -m ruff format --check src tests scripts` (71 files already formatted)
 - `python -m ruff check src tests scripts` (All checks passed!)
 - `python -m mypy src tests` (Success: no issues found in 70 source files)
-- `python -m pytest` (95 passed in 187.84s)
+- `python -m pytest tests/` (113 passed in 185.25s)
 - `python scripts/demonstrate_e2e.py` (Run 1: all 12 steps completed successfully!)
 - `python scripts/demonstrate_e2e.py` (Run 2: all 12 steps completed successfully!)
 - `python -m battlelab doctor` (Exit code 0)
 - `python -m battlelab config validate` (Exit code 0)
-- `python -m battlelab official status --json` (Exit code 0)
 - `python -m battlelab official readiness --json` (Exit code 0)
-- `python -m battlelab official activate --dry-run` (Exit code 0)
-- `git status` (Clean repository status, zero uncommitted data/ files)
+- `python -m battlelab official status --check` (Exit code 1 as expected for unready official adapter)
+- `python -m battlelab official activate --dry-run --json` (Exit code 0)
+- `git status --porcelain` (Clean repository status)
 

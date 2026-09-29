@@ -101,6 +101,34 @@ class OfficialCommandRunner:
             if "\0" in arg:
                 raise ValueError("NUL character not permitted in command arguments")
 
+        import math
+
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds < 0
+        ):
+            raise ValueError(
+                f"timeout_seconds must be a finite non-negative number, got {timeout_seconds!r}"
+            )
+        if (
+            isinstance(stdout_limit_bytes, bool)
+            or not isinstance(stdout_limit_bytes, int)
+            or stdout_limit_bytes < 0
+        ):
+            raise ValueError(
+                f"stdout_limit_bytes must be a non-negative integer, got {stdout_limit_bytes!r}"
+            )
+        if (
+            isinstance(stderr_limit_bytes, bool)
+            or not isinstance(stderr_limit_bytes, int)
+            or stderr_limit_bytes < 0
+        ):
+            raise ValueError(
+                f"stderr_limit_bytes must be a non-negative integer, got {stderr_limit_bytes!r}"
+            )
+
         cwd_path = Path(cwd)
         if not cwd_path.exists() or not cwd_path.is_dir():
             raise ValueError(f"Working directory does not exist or is not a directory: {cwd_path}")
@@ -129,9 +157,19 @@ class OfficialCommandRunner:
                 filtered_env[var_name] = os.environ[var_name]
         filtered_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
-        if env:
+        if env is not None:
+            if not isinstance(env, dict):
+                raise TypeError("env must be a dictionary")
             for k, v in env.items():
-                filtered_env[str(k)] = str(v)
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise TypeError("env variable names and values must be strings")
+                if "\0" in k or "\0" in v:
+                    raise ValueError(
+                        "NUL character not permitted in environment variable name or value"
+                    )
+                if k not in self.allowed_env_vars:
+                    raise ValueError(f"Environment variable '{k}' is not permitted by allowlist")
+                filtered_env[k] = v
 
         # 5. Launch process
         popen_kwargs: dict[str, Any] = {
@@ -145,7 +183,11 @@ class OfficialCommandRunner:
             popen_kwargs["start_new_session"] = True
 
         start_time = time.monotonic()
-        proc = subprocess.Popen(argv, **popen_kwargs)
+        try:
+            proc = subprocess.Popen(argv, **popen_kwargs)
+        except Exception as e:
+            redacted_err = self._redact(str(e), secrets)
+            raise RuntimeError(f"Failed to start command: {redacted_err}") from None
 
         # 6. Stream capture threads
         stdout_chunks: list[bytes] = []
@@ -187,9 +229,10 @@ class OfficialCommandRunner:
                     break
 
                 time.sleep(0.02)
-        except Exception:
+        except Exception as e:
             terminate_process_tree(proc, timeout_seconds=1.0)
-            raise
+            redacted_err = self._redact(str(e), secrets)
+            raise RuntimeError(f"Command execution error: {redacted_err}") from None
         finally:
             t_out.join(timeout=1.0)
             t_err.join(timeout=1.0)

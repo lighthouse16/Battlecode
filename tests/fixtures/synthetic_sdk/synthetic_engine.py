@@ -54,6 +54,7 @@ def main() -> int:
             "sdk_name": "SyntheticTestEngine",
             "sdk_version": "1.0.0-synthetic",
             "executable_exists": True,
+            "executable_runnable": True,
             "supported_modes": ["local"],
             "can_run_local": True,
             "can_submit": False,

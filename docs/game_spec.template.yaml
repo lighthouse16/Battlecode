@@ -1,7 +1,7 @@
 # Battlelab Typed & Source-Backed Game Specification Template
 schema_version: "1.0.0"
 competition_name: "Battlecode"
-competition_season: "Autumn 2026"
+competition_season: ""
 spec_version: "1.0.0"
 source_bundle_hash: ""
 official_document_hashes: []
