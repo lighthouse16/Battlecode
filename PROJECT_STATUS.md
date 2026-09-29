@@ -1,11 +1,13 @@
 # Battlelab Project Status
 
 ## Status Summary
-- **Phase**: Phase 2.1.3 Complete (Final Edge-Case Correctness Patch: Global Child Reaping Removal, Segment Minimum at Threshold 1, Root Source Symlink Rejection, Prohibited Source Entries Erroring, Runtime Telemetry Invariant and Count Semantics)
-- **Current Milestone**: Full local R&D platform operational with real subprocess bot execution, per-turn deadline enforcement, atomic SQLite job leases with lease fencing tokens, multi-scheduler safety, paired opponent-pool evaluation with weighted bootstrap confidence intervals, positive lower CI gates, pure per-turn runtime headroom gates with exact telemetry count invariants, segment evidence enforcement down to threshold 1, rejection of root and nested source symlinks as well as prohibited hidden/cache/bytecode files, clean process-tree termination without global child reaping, pre-promotion integrity verification, and CI quality gates across Ubuntu and Windows on Python 3.11 and 3.12.
+- **Phase**: Phase 3.0 Complete (Pre-Rule Official Integration Readiness: Authoritative Source Ingestion, Typed & Source-Backed Game Specification, Secure Official Command Runner, Generic Orchestration with Rule Bridge Separation, Normalized Replay Contract, Fail-Closed Readiness & Capability Reporting, Synthetic Fake SDK Test Harness, Day-0 Runbooks)
+- **Current Milestone**: Full pre-rule official integration readiness established without inventing competition rules, mechanics, or endpoints. Platform provides auditable source document ingestion (`battlelab official ingest`), typed 23-rule source-backed game specification (`battlelab official spec`), secure subprocess execution with bounded capture and process-tree cleanup (`OfficialCommandRunner`), decoupled rule bridge architecture (`OfficialEngineBridge`), normalized replay model with determinism comparison (`NormalizedReplay`), fail-closed readiness assessment (`battlelab official readiness`), synthetic test SDK harness (`tests/fixtures/synthetic_sdk/`), and complete Day-0 runbooks. Production adapter remains fail-closed (`ready: false`, `can_run_local: false`, `can_submit: false`).
 - **Engine Status**: 
-  - `MockAdapter`: Real subprocess execution over line-delimited JSON stdin/stdout protocol strictly from frozen, cryptographically verified artifact snapshots (`data/artifacts/<id>/`).
-  - `OfficialPlaceholderAdapter`: Strict placeholder awaiting Autumn rulebook and SDK documentation.
+  - `MockAdapter`: Real subprocess execution over line-delimited JSON stdin/stdout protocol strictly from frozen, cryptographically verified artifact snapshots (`data/artifacts/<id>/`). Produces normalized replay contracts.
+  - `OfficialAdapter`: Generic orchestration adapter for official competition games, decoupled from rules via `OfficialEngineBridge` and `OfficialCommandRunner`. Defaults to `UnconfiguredOfficialBridge` (fail-closed, non-operational until Day 0).
+  - `OfficialPlaceholderAdapter`: Preserved for backward compatibility.
+
 
 ## Completed Features
 - [x] Initial repository structure and workspace bootstrap.
@@ -42,7 +44,7 @@
 - [x] CLI `--entrypoint` Option: Added `--entrypoint` argument to `battlelab bot register` with validation.
 - [x] Isolated & Repeatable E2E Demonstration (`scripts/demonstrate_e2e.py`): Fully isolated via `tempfile.TemporaryDirectory()`, tests pause (`INTERRUPTED 2/8`) and resume (`COMPLETED 8/8`), with zero repository mutation.
 - [x] GitHub Actions CI Matrix: Complete matrix workflow (`.github/workflows/ci.yml`) on Ubuntu/Windows for Python 3.11 and 3.12 running ruff format, ruff check, mypy, pytest, demonstrate_e2e twice, CLI tournament, and working tree cleanliness check.
-- [x] Complete automated test suite (69 unit, integration, and contract tests including all 39 Phase 2.1.3 regression tests).
+- [x] Complete automated test suite (95 unit, integration, and contract tests including Phase 3.0 official integration tests).
 
 ## Currently Verified Behaviors
 - `battlelab doctor` accurately diagnoses environment, data directories, active champion, adapter readiness, and OS memory limit capabilities.
@@ -60,24 +62,31 @@
 - Segment evidence enforced: minimum segment sample size threshold of 1 enforced across seeds, maps, opponent groups, and sides; threshold 0 disables check; non-negative integer type validation.
 - Promotion gates verified: blocks failing bots, accepts statistical improvements, requires positive lower CI, verifies runtime headroom, enforces opponent weights, checks pre-promotion integrity, audits rollbacks, and uses recorded experiment configuration snapshots.
 - End-to-end demonstration script passes all 12 steps cleanly twice in clean temporary directories without repository mutation.
+- Official pre-rule readiness verified: source ingestion (`battlelab official ingest`), typed 23-rule specification validation (`battlelab official spec`), secure command execution (`OfficialCommandRunner`), decoupled bridge architecture (`OfficialEngineBridge`), normalized replay model (`NormalizedReplay`), and fail-closed readiness assessment (`battlelab official readiness`).
 
 ## Remaining Work
-- Official Autumn competition rules ingestion (pending official release by organizers).
-- Implementation of `OfficialAdapter` following `docs/day_zero_rule_ingestion.md` when SDK is released.
+- Ingestion of authoritative official rulebook and SDK (upon official release).
+- Implementation of rule-specific `OfficialEngineBridge` methods in `src/battlelab/official/bridge.py`.
+- Population of 23 rule sections in `configs/game_spec.yaml` with authoritative citations.
+- Creation of `OfficialMinimalBot` under `bots/baselines/official_minimal/`.
+- Execution of `docs/official_activation_runbook.md`.
 
 ## Known Limitations
-- Official SDK/rules not released; official adapter is non-functional placeholder by design.
-- Mock engine rules are synthetic tests of infrastructure, not strategic proxies for competition mechanics.
+- Official SDK/rules not released; official adapter is non-operational and fail-closed by design (`can_run_local: false`, `can_submit: false`).
+- Synthetic test SDK exists strictly under `tests/fixtures/synthetic_sdk/` for testing generic orchestration, timeouts, and contracts; never used in production.
 - Windows OS stdlib does not support portable POSIX `resource.setrlimit`; truthfully reported as unsupported by `battlelab doctor`.
 
 ## Exact Commands Last Run Successfully
-- `python -m ruff format --check src tests scripts` (60 files already formatted)
+- `python -m ruff format --check src tests scripts` (71 files already formatted)
 - `python -m ruff check src tests scripts` (All checks passed!)
-- `python -m mypy src tests` (Success: no issues found in 59 source files)
-- `python -m pytest` (69 passed in 180.18s)
+- `python -m mypy src tests` (Success: no issues found in 70 source files)
+- `python -m pytest` (95 passed in 187.84s)
 - `python scripts/demonstrate_e2e.py` (Run 1: all 12 steps completed successfully!)
 - `python scripts/demonstrate_e2e.py` (Run 2: all 12 steps completed successfully!)
 - `python -m battlelab doctor` (Exit code 0)
 - `python -m battlelab config validate` (Exit code 0)
+- `python -m battlelab official status --json` (Exit code 0)
+- `python -m battlelab official readiness --json` (Exit code 0)
+- `python -m battlelab official activate --dry-run` (Exit code 0)
 - `git status` (Clean repository status, zero uncommitted data/ files)
 

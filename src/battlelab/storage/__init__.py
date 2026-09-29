@@ -7,6 +7,7 @@ from battlelab.storage.paths import (
     get_data_dir,
     get_database_path,
     get_manifests_dir,
+    get_official_source_bundles_dir,
     get_project_root,
     get_replays_dir,
     get_reports_dir,
@@ -22,4 +23,5 @@ __all__ = [
     "get_manifests_dir",
     "get_database_path",
     "get_champion_manifest_path",
+    "get_official_source_bundles_dir",
 ]

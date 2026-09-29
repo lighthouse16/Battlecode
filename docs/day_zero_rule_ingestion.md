@@ -5,41 +5,45 @@ When the official Autumn Battlecode competition documentation and SDK become ava
 
 ## Workflow Sequence
 
-### Stage 1: Document Discovery & Receipt
-1. Place official rulebook PDF, markdown, or website dump into `docs/official_specs/`.
-2. Record download timestamp, document version, and checksum.
-3. Run `battlelab official integrate docs/official_specs/` to instantiate `configs/game_spec.yaml`.
+### Stage 1: Source Ingestion
+1. Place official rulebook PDFs, specification documents, or SDK release archives into an external directory (e.g. `raw_official_sources/`).
+2. Run source ingestion:
+   ```bash
+   battlelab official ingest raw_official_sources/ --copy --json
+   ```
+3. Record the generated deterministic `bundle_hash` (e.g., `a1b2c3d4...`).
+4. Verify the generated manifest at `data/official/source_bundles/<bundle_hash>/source_manifest.json`.
 
-### Stage 2: Extract & Verify Canonical Rule Items
-Fill every field in `configs/game_spec.yaml` with:
-- `meaning`: Exact rule summary.
-- `source_ref`: Section or page number in official documentation.
-- `verification_state`: `UNVERIFIED`, `DOCUMENTED`, or `TEST_VERIFIED`.
-- `implementation_impact`: Adapter, bot interface, or metrics effect.
-- `test_coverage`: Name of test verifying the rule.
+### Stage 2: Initialize & Populate Typed Game Specification
+1. Initialize the typed game specification from the verified bundle:
+   ```bash
+   battlelab official spec init \
+     --source-bundle <bundle_hash> \
+     --output configs/game_spec.yaml
+   ```
+2. Manually populate all 23 rule sections in `configs/game_spec.yaml`:
+   - Set `meaning` to the exact rule meaning.
+   - Add authoritative document citations in `source_refs` (e.g., `["Rulebook.pdf p. 4, Section 2.1"]`).
+   - Change `verification_state` from `MISSING` to `DOCUMENTED`.
+   - List `implementation_impacts` (e.g. adapter outcome mapping, bot action schemas).
+   - Once automated tests verify the rule, add test names to `test_coverage` and update `verification_state` to `TEST_VERIFIED`.
+3. Validate the specification:
+   ```bash
+   battlelab official spec validate configs/game_spec.yaml
+   ```
+   Ensure validation succeeds with zero errors.
 
-**Items to Extract:**
-- Victory, loss, draw, and tie-break conditions.
-- Turn structure (synchronous, sequential, phase-based).
-- Observation model (fog of war, full visibility, sensors).
-- Legal action space and execution order.
-- Units, structures, entity stats, and costs.
-- Resources, economy, and production formulas.
-- Movement, pathfinding rules, and collision resolution.
-- Combat, damage calculation, range, and cooldowns.
-- Map format, coordinate system, and symmetry rules.
-- Randomness sources and seeds.
-- Communication mechanisms (radio, shared memory, beacons).
-- Compute and memory limits (bytecode limits, per-turn time limits).
-- Supported programming languages and runtimes.
-- Official engine CLI commands for running local matches.
-- Official submission CLI commands or endpoints.
-- Replay file formats and download mechanisms.
-
-### Stage 3: Adapter Implementation
-1. Create `src/battlelab/adapters/official/adapter.py` subclassing `GameAdapter`.
-2. Connect official local engine CLI to `run_local_match()`.
-3. Implement `parse_replay()` for the official replay format.
-4. Implement minimal legal bot (`bots/baselines/official_minimal.py`).
-5. Run adapter contract tests: `pytest tests/contract/test_official_adapter.py`.
-6. Confirm local-to-remote parity before enabling ladder submissions.
+### Stage 3: SDK Installation & Bridge Implementation
+1. Install official SDK following official distribution instructions.
+2. Implement `OfficialEngineBridge` in `src/battlelab/official/bridge.py` (or inject custom bridge).
+3. Probe SDK:
+   ```bash
+   battlelab official sdk probe
+   ```
+4. Create the minimal legal official bot in `bots/baselines/official_minimal/`.
+5. Capture golden fixtures according to `docs/official_golden_fixture_workflow.md`.
+6. Run contract and readiness checks:
+   ```bash
+   battlelab official readiness --check
+   battlelab official activate --dry-run
+   ```

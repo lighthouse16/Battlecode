@@ -415,33 +415,174 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_official(args: argparse.Namespace) -> int:
-    """Official SDK interaction commands."""
+    """Official competition SDK integration commands."""
+    from battlelab.official.readiness import OfficialReadinessChecker
+    from battlelab.official.sources import ingest_sources
+    from battlelab.official.spec import init_game_spec, load_and_validate_spec
+
+    checker = OfficialReadinessChecker()
+
     if args.action == "status":
-        off = get_adapter("official_placeholder")
-        caps = off.get_capabilities()
-        print("Official Competition Integration Status:")
-        print("  Status:       UNRELEASED")
-        print("  Rulebook Ingested: NO")
-        print("  SDK Installed:    NO")
-        print(f"  Capability:   can_run_local={caps.can_run_local}, can_submit={caps.can_submit}")
-        print(
-            "  Instructions: When competition releases rules, follow docs/day_zero_rule_ingestion.md"
-        )
+        report = checker.evaluate()
+        if getattr(args, "json", False):
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            print("Official Competition Integration Status:")
+            print(f"  Ready:            {'YES' if report.ready else 'NO'}")
+            print(f"  Can Run Local:    {'YES' if report.can_run_local else 'NO'}")
+            print(f"  Can Submit:       {'YES' if report.can_submit else 'NO'}")
+            print(f"  Source Bundle:    {report.source_bundle_hash or 'None'}")
+            print(f"  Spec Hash:        {report.spec_hash or 'None'}")
+            print(f"  SDK Version:      {report.sdk_version or 'Unreleased'}")
+            if report.blockers:
+                print(f"  Blockers ({len(report.blockers)}):")
+                for b in report.blockers:
+                    print(f"    - {b}")
+        if getattr(args, "check", False) and not report.ready:
+            return 1
         return 0
 
-    elif args.action == "integrate":
-        doc_path = Path(args.path)
-        print(f"Initiating Day-Zero rules ingestion from: {doc_path}...")
-        # Template generator
-        spec_template_path = get_project_root() / "docs" / "game_spec.template.yaml"
-        target_path = get_project_root() / "configs" / "game_spec.yaml"
-        if spec_template_path.exists():
-            target_path.write_text(spec_template_path.read_text(encoding="utf-8"), encoding="utf-8")
-            print(f"Generated versioned game specification template at {target_path}")
+    elif args.action == "readiness":
+        report = checker.evaluate()
+        if getattr(args, "json", False):
+            print(json.dumps(report.to_dict(), indent=2))
         else:
-            print("Template generated in configs/game_spec.yaml")
-        print("Next step: Complete each section of configs/game_spec.yaml based on official docs.")
+            print("=" * 70)
+            print("OFFICIAL INTEGRATION READINESS CHECKLIST")
+            print("=" * 70)
+            for c in report.checks:
+                status = "[PASS]" if c.passed else "[FAIL]"
+                print(f"{status:<8} {c.name:<32} {c.details}")
+            print("-" * 70)
+            print(f"Overall Ready:      {report.ready}")
+            print(f"Can Run Local:      {report.can_run_local}")
+            print(f"Can Submit:         {report.can_submit}")
+            if report.blockers:
+                print(f"\nUnresolved Blockers ({len(report.blockers)}):")
+                for b in report.blockers:
+                    print(f"  * {b}")
+        if getattr(args, "check", False) and not report.ready:
+            return 1
         return 0
+
+    elif args.action in ("ingest", "integrate"):
+        src_path = Path(args.path)
+        try:
+            manifest = ingest_sources(src_path, copy_files=getattr(args, "copy", False))
+            if getattr(args, "json", False):
+                print(json.dumps(manifest.to_dict(), indent=2))
+            else:
+                print("Official Sources Ingestion Complete:")
+                print(f"  Bundle Hash:      {manifest.bundle_hash}")
+                print(f"  Source Path:      {manifest.source_path}")
+                print(f"  Files Ingested:   {manifest.file_count}")
+                print(f"  Total Bytes:      {manifest.total_size_bytes}")
+                print(
+                    f"  Manifest Path:    data/official/source_bundles/{manifest.bundle_hash}/source_manifest.json"
+                )
+            return 0
+        except Exception as e:
+            if getattr(args, "json", False):
+                print(json.dumps({"error": str(e)}, indent=2))
+            else:
+                print(f"Error ingesting official sources: {e}")
+            return 1
+
+    elif args.action == "spec":
+        spec_action = getattr(args, "spec_action", None)
+        if spec_action == "init":
+            try:
+                spec = init_game_spec(args.source_bundle, Path(args.output))
+                if getattr(args, "json", False):
+                    print(json.dumps(spec.to_dict(), indent=2))
+                else:
+                    print(f"Initialized game specification at {args.output}")
+                    print(f"  Source Bundle:    {spec.source_bundle_hash}")
+                    print(f"  Spec Version:     {spec.spec_version}")
+                    print(f"  Canonical Hash:   {spec.canonical_hash()}")
+                return 0
+            except Exception as e:
+                print(f"Error initializing spec: {e}")
+                return 1
+        elif spec_action == "validate":
+            is_valid, errors, spec_obj, is_ready = load_and_validate_spec(Path(args.path))
+            canonical_h = spec_obj.canonical_hash() if spec_obj else None
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "valid": is_valid,
+                            "activation_ready": is_ready,
+                            "canonical_hash": canonical_h,
+                            "errors": errors,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                if is_valid:
+                    print(f"Game specification at {args.path} is structurally valid.")
+                    print(f"  Canonical Hash:   {canonical_h}")
+                    print(f"  Activation Ready: {is_ready}")
+                    if not is_ready:
+                        print("  (Notice: Some rule items remain in MISSING state.)")
+                else:
+                    print(f"Game specification validation failed with {len(errors)} error(s):")
+                    for err in errors:
+                        print(f"  - {err}")
+            return 0 if is_valid else 1
+
+    elif args.action == "sdk":
+        sdk_action = getattr(args, "sdk_action", None)
+        if sdk_action == "probe":
+            try:
+                probe = checker.bridge.probe_sdk()
+                if getattr(args, "json", False):
+                    print(json.dumps(probe, indent=2))
+                else:
+                    print(f"Official SDK Probed: {probe}")
+                return 0
+            except Exception as e:
+                if getattr(args, "json", False):
+                    print(json.dumps({"error": str(e), "configured": False}, indent=2))
+                else:
+                    print(f"Official SDK Probe: {e}")
+                return 0
+
+    elif args.action == "activate":
+        if getattr(args, "dry_run", False):
+            dry_report = checker.dry_run_activation()
+            if getattr(args, "json", False):
+                print(json.dumps(dry_report, indent=2))
+            else:
+                print("Official Adapter Activation [DRY RUN]:")
+                print(f"  Status:           {dry_report['status']}")
+                print(f"  Message:          {dry_report['message']}")
+                print(f"  Ready:            {dry_report['ready']}")
+                print(f"  Source Bundle:    {dry_report['source_bundle_hash'] or 'None'}")
+                print(f"  Spec Hash:        {dry_report['spec_hash'] or 'None'}")
+                print(f"  SDK Version:      {dry_report['sdk_version'] or 'None'}")
+                if dry_report["blockers"]:
+                    print(f"  Blockers ({dry_report['blockers_count']}):")
+                    for b in dry_report["blockers"]:
+                        print(f"    - {b}")
+            return 0
+        else:
+            ack = getattr(args, "acknowledge_sdk", "")
+            if ack != "I_ACKNOWLEDGE_OFFICIAL_SDK_VALIDATION":
+                print("Error: Official activation requires exact acknowledgement flag:")
+                print("  --acknowledge-sdk I_ACKNOWLEDGE_OFFICIAL_SDK_VALIDATION")
+                return 1
+            dry_report = checker.dry_run_activation()
+            if not dry_report["ready"]:
+                print(
+                    f"Error: Cannot activate official adapter. Blockers exist ({dry_report['blockers_count']}):"
+                )
+                for b in dry_report["blockers"]:
+                    print(f"  - {b}")
+                return 1
+            print("Official adapter activated successfully.")
+            return 0
 
     return 1
 
@@ -574,9 +715,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     # official
     p_off = subparsers.add_parser("official", help="Official competition SDK integration")
     p_off_sub = p_off.add_subparsers(dest="action", required=True)
-    p_off_sub.add_parser("status", help="Official integration status")
+
+    # status
+    p_off_stat = p_off_sub.add_parser("status", help="Official integration status")
+    p_off_stat.add_argument("--json", action="store_true", help="Output status as JSON")
+    p_off_stat.add_argument("--check", action="store_true", help="Exit nonzero if not ready")
+
+    # readiness
+    p_off_ready = p_off_sub.add_parser("readiness", help="Detailed readiness checklist")
+    p_off_ready.add_argument("--json", action="store_true", help="Output checklist as JSON")
+    p_off_ready.add_argument("--check", action="store_true", help="Exit nonzero if not ready")
+
+    # ingest
+    p_off_ing = p_off_sub.add_parser("ingest", help="Ingest authoritative official sources")
+    p_off_ing.add_argument("path", help="Path to official document or directory")
+    p_off_ing.add_argument("--copy", action="store_true", help="Copy source files into bundle")
+    p_off_ing.add_argument("--json", action="store_true", help="Output manifest as JSON")
+
+    # integrate (backward-compatible alias)
     p_off_int = p_off_sub.add_parser("integrate", help="Ingest official documentation")
     p_off_int.add_argument("path", help="Path to official documentation")
+    p_off_int.add_argument("--copy", action="store_true", help="Copy source files into bundle")
+    p_off_int.add_argument("--json", action="store_true", help="Output manifest as JSON")
+
+    # spec
+    p_off_spec = p_off_sub.add_parser("spec", help="Game specification management")
+    p_off_spec_sub = p_off_spec.add_subparsers(dest="spec_action", required=True)
+
+    p_off_spec_init = p_off_spec_sub.add_parser("init", help="Initialize typed game specification")
+    p_off_spec_init.add_argument(
+        "--source-bundle", required=True, help="Ingested source bundle hash"
+    )
+    p_off_spec_init.add_argument(
+        "--output", required=True, help="Path to write game specification YAML"
+    )
+    p_off_spec_init.add_argument("--json", action="store_true", help="Output spec as JSON")
+
+    p_off_spec_val = p_off_spec_sub.add_parser("validate", help="Validate typed game specification")
+    p_off_spec_val.add_argument("path", help="Path to game specification YAML")
+    p_off_spec_val.add_argument("--json", action="store_true", help="Output validation as JSON")
+
+    # sdk
+    p_off_sdk = p_off_sub.add_parser("sdk", help="Official SDK operations")
+    p_off_sdk_sub = p_off_sdk.add_subparsers(dest="sdk_action", required=True)
+    p_off_sdk_probe = p_off_sdk_sub.add_parser("probe", help="Probe official SDK")
+    p_off_sdk_probe.add_argument("--json", action="store_true", help="Output probe as JSON")
+
+    # activate
+    p_off_act = p_off_sub.add_parser("activate", help="Activate official competition adapter")
+    p_off_act.add_argument("--dry-run", action="store_true", help="Dry run check without changes")
+    p_off_act.add_argument("--acknowledge-sdk", help="Explicit acknowledgement token")
+    p_off_act.add_argument("--json", action="store_true", help="Output activation report as JSON")
 
     parsed = parser.parse_args(argv)
 

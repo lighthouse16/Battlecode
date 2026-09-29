@@ -368,7 +368,7 @@ class MockAdapter(GameAdapter):
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    def parse_replay(self, replay_path: Path) -> dict[str, Any]:
+    def parse_replay(self, replay_path: Path) -> Any:
         if not replay_path.is_file():
             raise FileNotFoundError(f"Replay file not found: {replay_path}")
 
@@ -387,8 +387,34 @@ class MockAdapter(GameAdapter):
             raise ValueError("Replay file is empty")
 
         meta = frames[0] if frames[0].get("type") == "META" else {}
-        return {
-            "meta": meta,
-            "total_frames": len(frames),
-            "final_frame": frames[-1] if len(frames) > 1 else None,
-        }
+        final_frame = frames[-1] if len(frames) > 1 else None
+
+        from battlelab.official.models import NormalizedReplay
+
+        outcome_str = ""
+        scores_dict: dict[str, float] = {}
+        if final_frame and isinstance(final_frame, dict):
+            outcome_str = str(final_frame.get("outcome", ""))
+            scores_dict = {
+                "A": float(final_frame.get("score_a", 0.0)),
+                "B": float(final_frame.get("score_b", 0.0)),
+            }
+
+        return NormalizedReplay(
+            schema_version="1.0.0",
+            adapter_name=self.name,
+            adapter_version=self.version,
+            game_version="mock-v2-isolated",
+            map_id=str(meta.get("map_name", "")),
+            seed=int(meta.get("seed", 0)),
+            participants={
+                "A": str(meta.get("bot_a_id", "")),
+                "B": str(meta.get("bot_b_id", "")),
+            },
+            outcome=outcome_str,
+            scores=scores_dict,
+            turn_count=max(0, len(frames) - 1),
+            events=frames[1:],
+            raw_replay_hash=hash_file(replay_path),
+            source_metadata={"meta": meta, "final_frame": final_frame},
+        )

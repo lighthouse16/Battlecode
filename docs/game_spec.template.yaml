@@ -1,83 +1,219 @@
-# Template for versioned game_spec.yaml (Instantiated upon official rules ingestion)
-game_name: "Battlecode Autumn Competition"
+# Battlelab Typed & Source-Backed Game Specification Template
+schema_version: "1.0.0"
+competition_name: "Battlecode"
+competition_season: "Autumn 2026"
 spec_version: "1.0.0"
-ingestion_date: ""
-official_doc_hash: ""
+source_bundle_hash: ""
+official_document_hashes: []
+sdk_version: ""
+generated_at: ""
+updated_at: ""
 
 rules:
-  victory_conditions:
-    meaning: "Explicit primary and tie-break victory rules"
-    source_ref: "Rulebook Section 1.2"
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Adapter MatchResult outcome resolution"
-    test_coverage: ""
+  victory_loss_draw_tiebreak:
+    meaning: "Explicit primary, secondary, and tie-break victory conditions"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "battlelab.core.models.MatchOutcome resolution"
+      - "battlelab.adapters.official.bridge.OfficialEngineBridge.normalize_outcome"
+    test_coverage: []
+    notes: ""
 
-  turn_structure:
-    meaning: "Turn ordering and resolution sequence"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Engine step loop"
-    test_coverage: ""
+  turn_and_phase_ordering:
+    meaning: "Turn sequencing, phase ordering, action resolution order"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Engine step sequencing and bot polling order"
+    test_coverage: []
+    notes: ""
 
-  observation_model:
-    meaning: "Visibility, fog of war, and sensor ranges"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Bot state dictionary"
-    test_coverage: ""
+  observation_and_visibility:
+    meaning: "Fog of war, sensor radius, shared vision, concealed information"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "State payload filtering provided to bot subprocess"
+    test_coverage: []
+    notes: ""
 
-  legal_actions:
-    meaning: "Enumeration of valid action types"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Action validation schema"
-    test_coverage: ""
+  legal_action_space:
+    meaning: "Valid action types, action parameters, queueing rules"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Bot response action validation"
+    test_coverage: []
+    notes: ""
 
-  units_and_entities:
-    meaning: "Entity types, health, attack, costs"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Entity models"
-    test_coverage: ""
+  units_entities_structures:
+    meaning: "Unit archetypes, structure types, health, armor, build costs"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Entity state representation and heuristic evaluation"
+    test_coverage: []
+    notes: ""
 
   resources_and_economy:
-    meaning: "Resource generation, mining, currency"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Economic heuristics"
-    test_coverage: ""
+    meaning: "Resource generation rates, mining nodes, resource transfer, income"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Economic model and scoring metrics"
+    test_coverage: []
+    notes: ""
 
   movement_and_collision:
-    meaning: "Tile occupancy, collisions, terrain costs"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Pathfinder module"
-    test_coverage: ""
+    meaning: "Movement mechanics, cooldowns, terrain traversal costs, collisions"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Pathfinding heuristics and collision avoidance"
+    test_coverage: []
+    notes: ""
 
-  combat_mechanics:
-    meaning: "Damage application, weapon types, range"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Tactical module"
-    test_coverage: ""
+  combat_and_damage:
+    meaning: "Attack ranges, damage calculations, cooldowns, area-of-effect"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Combat tactical assessment and damage prediction"
+    test_coverage: []
+    notes: ""
 
-  compute_and_memory_limits:
-    meaning: "Per-turn time limit and bytecode/memory caps"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Process runner timeout configuration"
-    test_coverage: ""
+  maps_coordinates_symmetry:
+    meaning: "Coordinate systems, grid geometry, rotational/reflectional symmetry"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Map representation and symmetric pairing validation"
+    test_coverage: []
+    notes: ""
 
-  local_engine_commands:
-    meaning: "CLI commands to execute match locally"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Adapter subprocess invocation"
-    test_coverage: ""
+  randomness_and_seeds:
+    meaning: "RNG algorithms, match seed injection, map generation seeds"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "MatchSpec seed passing to engine"
+    test_coverage: []
+    notes: ""
 
-  submission_commands:
-    meaning: "CLI commands or API endpoint for ladder submission"
-    source_ref: ""
-    verification_state: "UNVERIFIED"
-    implementation_impact: "Adapter submit_artifact method"
-    test_coverage: ""
+  communication_shared_memory:
+    meaning: "Inter-unit messaging bandwidth, shared team arrays, communication limits"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Team communication protocol support"
+    test_coverage: []
+    notes: ""
+
+  compute_bytecode_time_memory_limits:
+    meaning: "Execution limits: milliseconds per turn, bytecode limits, heap memory"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "battlelab.bots.process_runner execution timeouts"
+    test_coverage: []
+    notes: ""
+
+  supported_languages_runtimes:
+    meaning: "Official language specifications (Python version, Java JDK, etc.)"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "Bot packaging and runner environment validation"
+    test_coverage: []
+    notes: ""
+
+  bot_source_layout_entrypoint:
+    meaning: "Required repository directory structure and entrypoint script"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "battlelab.bots.artifacts entrypoint resolution"
+    test_coverage: []
+    notes: ""
+
+  build_package_process:
+    meaning: "Bot packaging, compilation, ZIP archiving, or container bundling"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "OfficialEngineBridge.build_or_prepare_artifact"
+    test_coverage: []
+    notes: ""
+
+  local_engine_command_structure:
+    meaning: "Command-line invocation syntax for local headless match runner"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "OfficialEngineBridge.build_match_command"
+    test_coverage: []
+    notes: ""
+
+  local_engine_output_exit_codes:
+    meaning: "Standard output format, exit code definitions, error outputs"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "OfficialEngineBridge.parse_match_result"
+    test_coverage: []
+    notes: ""
+
+  replay_discovery_format:
+    meaning: "Replay file location, serialization format (JSON/binary), framing"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "OfficialEngineBridge.locate_replay and parse_replay"
+    test_coverage: []
+    notes: ""
+
+  outcome_score_mapping:
+    meaning: "Numerical scoring rules, tie-break score calculation"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "MatchResult score_a and score_b assignment"
+    test_coverage: []
+    notes: ""
+
+  official_starter_bot:
+    meaning: "Baseline starter bot location and legal baseline moves"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "bots/baselines/official_minimal artifact"
+    test_coverage: []
+    notes: ""
+
+  remote_test_mechanism:
+    meaning: "Official remote test queue or scrimmage server API"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "GameAdapter.run_remote_test"
+    test_coverage: []
+    notes: ""
+
+  submission_mechanism:
+    meaning: "Official upload portal, CLI tool, or API endpoints for ladder submission"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "GameAdapter.submit_artifact"
+    test_coverage: []
+    notes: ""
+
+  match_replay_retrieval:
+    meaning: "Automated retrieval of public ladder match replays and outcomes"
+    source_refs: []
+    verification_state: "MISSING"
+    implementation_impacts:
+      - "GameAdapter.list_official_matches"
+    test_coverage: []
+    notes: ""

@@ -111,3 +111,15 @@ def get_champion_manifest_path() -> Path:
     p = get_project_root() / "bots" / "champion" / "champion_manifest.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def get_official_source_bundles_dir() -> Path:
+    bundles_env = os.environ.get("BATTLELAB_OFFICIAL_BUNDLES_DIR")
+    if bundles_env:
+        p = Path(bundles_env)
+        if not p.is_absolute():
+            p = get_project_root() / p
+    else:
+        p = get_data_dir() / "official" / "source_bundles"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
