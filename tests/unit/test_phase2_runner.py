@@ -102,11 +102,15 @@ print(child.pid, flush=True)
 while True:
     time.sleep(1)
 """
+    extra_kwargs = {}
+    if sys.platform != "win32":
+        extra_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         [sys.executable, "-c", code],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        **extra_kwargs,
     )
     assert proc.stdout is not None
     child_pid_line = proc.stdout.readline().strip()

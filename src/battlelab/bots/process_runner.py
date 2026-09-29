@@ -58,9 +58,11 @@ def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0)
 
             getpgid = getattr(os, "getpgid", None)
             killpg = getattr(os, "killpg", None)
+            getpgrp = getattr(os, "getpgrp", None)
+            curr_pgid = getpgrp() if getpgrp else -1
             if getpgid and killpg:
                 pgid = getpgid(pid)
-                if pgid > 0:
+                if pgid > 0 and pgid != curr_pgid:
                     killpg(pgid, signal.SIGTERM)
         except Exception:
             pass
@@ -84,10 +86,12 @@ def terminate_process_tree(proc: subprocess.Popen, timeout_seconds: float = 1.0)
 
                 getpgid = getattr(os, "getpgid", None)
                 killpg = getattr(os, "killpg", None)
+                getpgrp = getattr(os, "getpgrp", None)
+                curr_pgid = getpgrp() if getpgrp else -1
                 sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
                 if getpgid and killpg:
                     pgid = getpgid(pid)
-                    if pgid > 0:
+                    if pgid > 0 and pgid != curr_pgid:
                         killpg(pgid, sigkill)
             except Exception:
                 pass

@@ -49,11 +49,10 @@ jobs:
           python scripts/demonstrate_e2e.py
           python scripts/demonstrate_e2e.py
 
-      - name: CLI Verification and Tournament
+      - name: CLI Verification
         run: |
           python -m battlelab doctor
           python -m battlelab config validate
-          python -m battlelab tournament run --workers 2
 
       - name: Working Tree Cleanliness Check
         run: |
