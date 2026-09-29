@@ -6,6 +6,7 @@ NOTE: Purely for infrastructure verification, not a competition strategy model.
 from __future__ import annotations
 
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,6 +48,7 @@ class EngineResult:
     crashed_p1: bool = False
     timed_out_p0: bool = False
     timed_out_p1: bool = False
+    cancelled: bool = False
     stderr_p0: str = ""
     stderr_p1: str = ""
 
@@ -92,6 +94,7 @@ class MockEngine:
         bot_proc_1: BotSubprocess,
         per_turn_limit_ms: int = 5000,
         match_wall_clock_limit_ms: int = 60000,
+        cancel_event: threading.Event | None = None,
     ) -> EngineResult:
         """Run match between two isolated bot subprocesses."""
         start_time = time.perf_counter()
@@ -111,9 +114,15 @@ class MockEngine:
         invalid_p1 = False
         protocol_p0 = False
         protocol_p1 = False
+        cancelled = False
 
         try:
             while self.current_turn < self.max_turns:
+                # Check active cancellation
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+
                 # Check match wall-clock limit
                 if (time.perf_counter() - start_time) * 1000.0 > match_wall_clock_limit_ms:
                     timed_out_p0 = True
@@ -127,7 +136,10 @@ class MockEngine:
                 action_0, status_0 = bot_proc_0.send_turn(obs_0, timeout_seconds=turn_timeout_sec)
                 self.p0.total_time_ms += status_0.get("elapsed_ms", 0.0)
 
-                if status_0["timed_out"]:
+                if status_0.get("cancelled"):
+                    cancelled = True
+                    break
+                elif status_0["timed_out"]:
                     timed_out_p0 = True
                     self._record_frame("TIMEOUT", {"player": 0})
                     break
@@ -151,12 +163,19 @@ class MockEngine:
                         self._record_frame("INVALID_ACTION", {"player": 0, "action": action_0})
                         break
 
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+
                 # Player 1 Turn
                 obs_1 = self.get_public_state(1)
                 action_1, status_1 = bot_proc_1.send_turn(obs_1, timeout_seconds=turn_timeout_sec)
                 self.p1.total_time_ms += status_1.get("elapsed_ms", 0.0)
 
-                if status_1["timed_out"]:
+                if status_1.get("cancelled"):
+                    cancelled = True
+                    break
+                elif status_1["timed_out"]:
                     timed_out_p1 = True
                     self._record_frame("TIMEOUT", {"player": 1})
                     break
@@ -217,6 +236,7 @@ class MockEngine:
             crashed_p1=crashed_p1,
             timed_out_p0=timed_out_p0,
             timed_out_p1=timed_out_p1,
+            cancelled=cancelled,
             stderr_p0="\n".join(bot_proc_0.stderr_lines),
             stderr_p1="\n".join(bot_proc_1.stderr_lines),
         )

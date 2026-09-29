@@ -222,10 +222,17 @@ class Experiment:
     promotion_decision: str = "PENDING"  # PENDING, PROMOTED, REJECTED
     rejection_reason: str | None = None
     representative_replays: list[str] = field(default_factory=list)
+    evaluation_config: dict[str, Any] = field(default_factory=dict)
+    evaluation_config_hash: str = ""
+    opponent_pool_config: dict[str, Any] = field(default_factory=dict)
+    opponent_pool_config_hash: str = ""
+    promotion_config_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Experiment:
-        return cls(**data)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)

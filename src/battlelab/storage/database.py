@@ -529,15 +529,23 @@ class Database:
                         intended_change, status, created_at, completed_at,
                         evaluation_matrix_json, acceptance_criteria_json,
                         results_summary_json, promotion_decision, rejection_reason,
-                        representative_replays_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        representative_replays_json,
+                        evaluation_config_json, evaluation_config_hash,
+                        opponent_pool_config_json, opponent_pool_config_hash,
+                        promotion_config_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(experiment_id) DO UPDATE SET
                         status=excluded.status,
                         completed_at=excluded.completed_at,
                         results_summary_json=excluded.results_summary_json,
                         promotion_decision=excluded.promotion_decision,
                         rejection_reason=excluded.rejection_reason,
-                        representative_replays_json=excluded.representative_replays_json
+                        representative_replays_json=excluded.representative_replays_json,
+                        evaluation_config_json=excluded.evaluation_config_json,
+                        evaluation_config_hash=excluded.evaluation_config_hash,
+                        opponent_pool_config_json=excluded.opponent_pool_config_json,
+                        opponent_pool_config_hash=excluded.opponent_pool_config_hash,
+                        promotion_config_hash=excluded.promotion_config_hash
                     """,
                     (
                         exp.experiment_id,
@@ -554,6 +562,11 @@ class Database:
                         exp.promotion_decision,
                         exp.rejection_reason,
                         json.dumps(exp.representative_replays),
+                        json.dumps(exp.evaluation_config),
+                        exp.evaluation_config_hash,
+                        json.dumps(exp.opponent_pool_config),
+                        exp.opponent_pool_config_hash,
+                        exp.promotion_config_hash,
                     ),
                 )
 
@@ -564,6 +577,7 @@ class Database:
             ).fetchone()
             if not row:
                 return None
+            keys = row.keys()
             return Experiment(
                 experiment_id=row["experiment_id"],
                 hypothesis=row["hypothesis"],
@@ -581,32 +595,65 @@ class Database:
                 promotion_decision=row["promotion_decision"],
                 rejection_reason=row["rejection_reason"],
                 representative_replays=json.loads(row["representative_replays_json"]),
+                evaluation_config=json.loads(row["evaluation_config_json"])
+                if "evaluation_config_json" in keys and row["evaluation_config_json"]
+                else {},
+                evaluation_config_hash=row["evaluation_config_hash"]
+                if "evaluation_config_hash" in keys and row["evaluation_config_hash"]
+                else "",
+                opponent_pool_config=json.loads(row["opponent_pool_config_json"])
+                if "opponent_pool_config_json" in keys and row["opponent_pool_config_json"]
+                else {},
+                opponent_pool_config_hash=row["opponent_pool_config_hash"]
+                if "opponent_pool_config_hash" in keys and row["opponent_pool_config_hash"]
+                else "",
+                promotion_config_hash=row["promotion_config_hash"]
+                if "promotion_config_hash" in keys and row["promotion_config_hash"]
+                else "",
             )
 
     def list_experiments(self) -> list[Experiment]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM experiments ORDER BY created_at DESC").fetchall()
-            return [
-                Experiment(
-                    experiment_id=row["experiment_id"],
-                    hypothesis=row["hypothesis"],
-                    baseline_artifact_id=row["baseline_artifact_id"],
-                    challenger_artifact_id=row["challenger_artifact_id"],
-                    intended_change=row["intended_change"],
-                    status=row["status"],
-                    created_at=row["created_at"],
-                    completed_at=row["completed_at"],
-                    evaluation_matrix=json.loads(row["evaluation_matrix_json"]),
-                    acceptance_criteria=json.loads(row["acceptance_criteria_json"]),
-                    results_summary=json.loads(row["results_summary_json"])
-                    if row["results_summary_json"]
-                    else None,
-                    promotion_decision=row["promotion_decision"],
-                    rejection_reason=row["rejection_reason"],
-                    representative_replays=json.loads(row["representative_replays_json"]),
+            result: list[Experiment] = []
+            for row in rows:
+                keys = row.keys()
+                result.append(
+                    Experiment(
+                        experiment_id=row["experiment_id"],
+                        hypothesis=row["hypothesis"],
+                        baseline_artifact_id=row["baseline_artifact_id"],
+                        challenger_artifact_id=row["challenger_artifact_id"],
+                        intended_change=row["intended_change"],
+                        status=row["status"],
+                        created_at=row["created_at"],
+                        completed_at=row["completed_at"],
+                        evaluation_matrix=json.loads(row["evaluation_matrix_json"]),
+                        acceptance_criteria=json.loads(row["acceptance_criteria_json"]),
+                        results_summary=json.loads(row["results_summary_json"])
+                        if row["results_summary_json"]
+                        else None,
+                        promotion_decision=row["promotion_decision"],
+                        rejection_reason=row["rejection_reason"],
+                        representative_replays=json.loads(row["representative_replays_json"]),
+                        evaluation_config=json.loads(row["evaluation_config_json"])
+                        if "evaluation_config_json" in keys and row["evaluation_config_json"]
+                        else {},
+                        evaluation_config_hash=row["evaluation_config_hash"]
+                        if "evaluation_config_hash" in keys and row["evaluation_config_hash"]
+                        else "",
+                        opponent_pool_config=json.loads(row["opponent_pool_config_json"])
+                        if "opponent_pool_config_json" in keys and row["opponent_pool_config_json"]
+                        else {},
+                        opponent_pool_config_hash=row["opponent_pool_config_hash"]
+                        if "opponent_pool_config_hash" in keys and row["opponent_pool_config_hash"]
+                        else "",
+                        promotion_config_hash=row["promotion_config_hash"]
+                        if "promotion_config_hash" in keys and row["promotion_config_hash"]
+                        else "",
+                    )
                 )
-                for row in rows
-            ]
+            return result
 
     # --- Promotions ---
 

@@ -78,7 +78,7 @@ class PromotionGateError(BattlelabError):
 
     def __init__(self, message: str, violations: list[str] | None = None):
         super().__init__(message)
-        self.violations = violations or []
+        self.violations = violations if violations is not None else [message]
 
 
 class StorageError(BattlelabError):

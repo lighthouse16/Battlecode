@@ -163,11 +163,13 @@ class BotSubprocess:
         cwd: Path,
         env: dict[str, str] | None = None,
         memory_limit_mb: int = 512,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.entrypoint_path = entrypoint_path
         self.cwd = cwd
         self.env = env
         self.memory_limit_mb = memory_limit_mb
+        self.cancel_event = cancel_event
         self.proc: subprocess.Popen | None = None
         self.stdout_queue: queue.Queue[tuple[str | None, str | None]] = queue.Queue()
         self.stderr_lines: list[str] = []
@@ -180,7 +182,9 @@ class BotSubprocess:
         """Launch the bot in an unbuffered subprocess with process group isolation."""
         extra_kwargs: dict[str, Any] = {}
         if platform.system() == "Windows":
-            extra_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if creationflags:
+                extra_kwargs["creationflags"] = creationflags
         else:
             extra_kwargs["start_new_session"] = True
 
@@ -286,25 +290,43 @@ class BotSubprocess:
                 "elapsed_ms": elapsed_ms,
             }
 
-        # 2. Wait for action line from stdout queue with timeout
-        try:
-            out_line, err = self.stdout_queue.get(timeout=timeout_seconds)
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            self.turn_durations_ms.append(elapsed_ms)
-        except queue.Empty:
-            # HARD TIMEOUT: Kill process immediately
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            self.turn_durations_ms.append(elapsed_ms)
-            self.stop()
-            return None, {
-                "timed_out": True,
-                "crashed": False,
-                "malformed": False,
-                "raw_output": "",
-                "stderr": f"Execution exceeded hard timeout of {timeout_seconds * 1000:.1f}ms\n"
-                + "\n".join(self.stderr_lines),
-                "elapsed_ms": elapsed_ms,
-            }
+        # 2. Wait for action line from stdout queue with timeout and cancellation checks
+        out_line: str | None = None
+        deadline = start_time + timeout_seconds
+        while True:
+            if self.cancel_event and self.cancel_event.is_set():
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                self.stop()
+                return None, {
+                    "timed_out": False,
+                    "crashed": False,
+                    "cancelled": True,
+                    "raw_output": "",
+                    "stderr": "Execution cancelled due to lost lease",
+                    "elapsed_ms": elapsed_ms,
+                }
+            remaining = max(0.0, deadline - time.perf_counter())
+            if remaining <= 0:
+                # HARD TIMEOUT: Kill process immediately
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                self.turn_durations_ms.append(elapsed_ms)
+                self.stop()
+                return None, {
+                    "timed_out": True,
+                    "crashed": False,
+                    "malformed": False,
+                    "raw_output": "",
+                    "stderr": f"Execution exceeded hard timeout of {timeout_seconds * 1000:.1f}ms\n"
+                    + "\n".join(self.stderr_lines),
+                    "elapsed_ms": elapsed_ms,
+                }
+            try:
+                out_line, err = self.stdout_queue.get(timeout=min(0.05, remaining))
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                self.turn_durations_ms.append(elapsed_ms)
+                break
+            except queue.Empty:
+                continue
 
         if out_line is None:
             # Process exited or EOF reached
@@ -355,8 +377,10 @@ class BotSubprocess:
                 "p50": 0.0,
                 "p90": 0.0,
                 "p99": 0.0,
+                "max_turn_ms": 0.0,
                 "headroom": 1.0,
                 "turn_count": 0,
+                "turn_durations_ms": [],
             }
         s = sorted(self.turn_durations_ms)
         n = len(s)
@@ -368,13 +392,16 @@ class BotSubprocess:
         p50 = _pct(0.50)
         p90 = _pct(0.90)
         p99 = _pct(0.99)
+        max_turn = round(s[-1], 2)
         headroom = round(max(0.0, 1.0 - (p99 / max(1.0, float(per_turn_limit_ms)))), 4)
         return {
             "p50": p50,
             "p90": p90,
             "p99": p99,
+            "max_turn_ms": max_turn,
             "headroom": headroom,
             "turn_count": n,
+            "turn_durations_ms": list(self.turn_durations_ms),
         }
 
     def stop(self) -> None:

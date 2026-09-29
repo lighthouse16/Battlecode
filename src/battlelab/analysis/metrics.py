@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import statistics
 from typing import Any
 
@@ -262,6 +263,9 @@ def calculate_paired_experiment_metrics(
     side_score_deltas: dict[str, list[float]] = {}
     side_win_deltas: dict[str, list[float]] = {}
 
+    seed_score_deltas: dict[str, list[float]] = {}
+    seed_win_deltas: dict[str, list[float]] = {}
+
     for pair_id, pair_data in pairs.items():
         if "challenger" not in pair_data or "baseline" not in pair_data:
             continue
@@ -330,6 +334,13 @@ def calculate_paired_experiment_metrics(
             side_win_deltas[side_label] = []
         side_score_deltas[side_label].append(delta_score)
         side_win_deltas[side_label].append(delta_win)
+
+        seed_str = str(m_c.get("seed", "unknown"))
+        if seed_str not in seed_score_deltas:
+            seed_score_deltas[seed_str] = []
+            seed_win_deltas[seed_str] = []
+        seed_score_deltas[seed_str].append(delta_score)
+        seed_win_deltas[seed_str].append(delta_win)
 
         if score_c < score_b:
             regressions.append(
@@ -420,14 +431,74 @@ def calculate_paired_experiment_metrics(
             "mean_win_diff": round(m_win, 4),
         }
 
-    # Runtime headroom
+    # Breakdown by seed
+    by_seed_paired: dict[str, dict[str, Any]] = {}
+    for sd, s_deltas in seed_score_deltas.items():
+        w_deltas = seed_win_deltas[sd]
+        m_score, _, _ = paired_bootstrap_difference(s_deltas)
+        m_win, _, _ = paired_bootstrap_difference(w_deltas)
+        by_seed_paired[sd] = {
+            "pair_count": len(s_deltas),
+            "mean_score_diff": round(m_score, 4),
+            "mean_win_diff": round(m_win, 4),
+        }
+
+    # Runtime headroom: strictly from challenger per-turn bot measurements
+    challenger_turn_durations: list[float] = []
+    for m in matches:
+        is_challenger_a = m.get("bot_a_id") == challenger_id
+        is_challenger_b = m.get("bot_b_id") == challenger_id
+        if not is_challenger_a and not is_challenger_b:
+            continue
+
+        stats_key = "bot_a_stats" if is_challenger_a else "bot_b_stats"
+        stats = m.get(stats_key)
+        if not stats or not isinstance(stats, dict):
+            rj = m.get("result_json")
+            if rj:
+                if isinstance(rj, str):
+                    try:
+                        rj = json.loads(rj)
+                    except Exception:
+                        rj = {}
+                if isinstance(rj, dict) and stats_key in rj and isinstance(rj[stats_key], dict):
+                    stats = rj[stats_key]
+
+        if isinstance(stats, dict):
+            if t_durs := stats.get("turn_durations_ms"):
+                challenger_turn_durations.extend([float(x) for x in t_durs])
+            elif (max_turn := stats.get("max_turn_ms")) is not None:
+                challenger_turn_durations.append(float(max_turn))
+
+    if not challenger_turn_durations:
+        # ponytail: fallback to whole-match duration if bot turn-level telemetry absent
+        for m in matches:
+            if m.get("bot_a_id") == challenger_id or m.get("bot_b_id") == challenger_id:
+                if dur := m.get("duration_ms"):
+                    challenger_turn_durations.append(float(dur))
+
+    if challenger_turn_durations:
+        challenger_turn_durations.sort()
+        p50 = statistics.median(challenger_turn_durations)
+        p90_idx = int(0.90 * len(challenger_turn_durations))
+        p99_idx = int(0.99 * len(challenger_turn_durations))
+        p90 = challenger_turn_durations[min(p90_idx, len(challenger_turn_durations) - 1)]
+        p99 = challenger_turn_durations[min(p99_idx, len(challenger_turn_durations) - 1)]
+    else:
+        p50, p90, p99 = 0.0, 0.0, 0.0
+
     per_turn_limit = 5000.0
     for m in matches:
         if limit := (m.get("per_turn_limit_ms") or m.get("time_limit_ms")):
             per_turn_limit = float(limit)
             break
-    p99_dur = overall.get("runtime_percentiles_ms", {}).get("p99", 0.0)
-    headroom = 1.0 - (p99_dur / per_turn_limit) if per_turn_limit > 0 else 1.0
+
+    headroom = 1.0 - (p99 / per_turn_limit) if per_turn_limit > 0 else 1.0
+    overall["runtime_percentiles_ms"] = {
+        "p50": round(p50, 2),
+        "p90": round(p90, 2),
+        "p99": round(p99, 2),
+    }
     overall["runtime_headroom"] = round(max(0.0, min(1.0, headroom)), 4)
     overall["per_turn_limit_ms"] = per_turn_limit
 
@@ -480,6 +551,7 @@ def calculate_paired_experiment_metrics(
             "by_opponent_group": by_opponent_group,
             "by_map": by_map_paired,
             "by_side": by_side_paired,
+            "by_seed": by_seed_paired,
             "worst_regressions": regressions[:5],
         },
         "direct_head_to_head": direct_metrics,

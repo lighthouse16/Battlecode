@@ -12,6 +12,7 @@ from battlelab.adapters import get_adapter
 from battlelab.bots.registry import BotRegistry
 from battlelab.config.loader import load_yaml_config
 from battlelab.core.errors import PromotionGateError
+from battlelab.core.hashing import hash_dict
 from battlelab.core.models import Experiment, MatchSpec
 from battlelab.storage.database import Database
 from battlelab.storage.paths import get_data_dir
@@ -82,6 +83,37 @@ class PromotionGate:
             violations.append(
                 f"Valid sample size {valid_matches} is below minimum requirement of {min_sample} matches."
             )
+
+        completed_pairs = paired.get("completed_pairs", 0)
+        min_pairs_required = min_sample // 2 if min_sample > 1 else min_sample
+        if completed_pairs < min_pairs_required:
+            violations.append(
+                f"Insufficient evidence: Completed pairs count ({completed_pairs}) is below minimum requirement of {min_pairs_required} pairs."
+            )
+
+        min_segment_sample = cfg.get("min_segment_sample_size", 1)
+        if min_segment_sample > 1:
+            by_grp = paired.get("by_opponent_group", {})
+            for grp_name, grp_stats in by_grp.items():
+                p_cnt = grp_stats.get("pair_count", 0)
+                if p_cnt < min_segment_sample:
+                    violations.append(
+                        f"Insufficient evidence: Opponent group '{grp_name}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                    )
+            by_map = paired.get("by_map", {})
+            for map_name, map_stats in by_map.items():
+                p_cnt = map_stats.get("pair_count", 0)
+                if p_cnt < min_segment_sample:
+                    violations.append(
+                        f"Insufficient evidence: Map '{map_name}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                    )
+            by_side = paired.get("by_side", {})
+            for side_name, side_stats in by_side.items():
+                p_cnt = side_stats.get("pair_count", 0)
+                if p_cnt < min_segment_sample:
+                    violations.append(
+                        f"Insufficient evidence: Side '{side_name}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                    )
 
         # 3. Overall Win Rate threshold
         if win_rate < min_win_rate:
@@ -303,10 +335,15 @@ class PromotionGate:
                 f"Experiment {experiment_id} has no completed results summary."
             )
 
-        # 1. Verify Artifact Integrity
+        # 1. Verify Artifact Integrity (both challenger and baseline)
         ok_chal, err_chal = self._verify_artifact_integrity(exp.challenger_artifact_id)
         if not ok_chal:
             raise PromotionGateError(f"Challenger integrity check failed: {err_chal}")
+
+        if exp.baseline_artifact_id:
+            ok_base, err_base = self._verify_artifact_integrity(exp.baseline_artifact_id)
+            if not ok_base:
+                raise PromotionGateError(f"Baseline integrity check failed: {err_base}")
 
         # 2. Check Criteria
         check_res = self.check_criteria(exp, exp.results_summary)
@@ -372,6 +409,7 @@ class PromotionGate:
         promotion_id = f"prom_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
         mode = "MANUAL_OVERRIDE" if is_override else "MANUAL_VERIFIED"
         challenger_art = self.registry.get_artifact(exp.challenger_artifact_id)
+        promotion_config_hash = hash_dict(check_res["config_applied"])
 
         self.db.save_promotion(
             promotion_id=promotion_id,
@@ -388,11 +426,12 @@ class PromotionGate:
             if check_res["violations"]
             else None,
             artifact_manifest_hash=challenger_art.manifest_hash if challenger_art else None,
-            config_hash=getattr(exp, "config_hash", None),
+            config_hash=promotion_config_hash,
         )
 
         exp.promotion_decision = "PROMOTED"
         exp.rejection_reason = None
+        exp.promotion_config_hash = promotion_config_hash
         self.db.save_experiment(exp)
 
         return {

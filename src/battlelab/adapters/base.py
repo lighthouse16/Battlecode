@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,7 @@ class GameAdapter(ABC):
         bot_a: BotArtifact,
         bot_b: BotArtifact,
         work_dir: Path,
+        cancel_event: threading.Event | None = None,
     ) -> MatchResult:
         """Run a single local match between two bots deterministically."""
         pass

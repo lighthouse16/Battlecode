@@ -37,6 +37,9 @@ def generate_experiment_report(
         "## 2. Artifact Provenance",
         f"- **Challenger Artifact**: `{exp.challenger_artifact_id}`",
         f"- **Baseline Artifact**: `{exp.baseline_artifact_id}`",
+        f"- **Evaluation Config Hash**: `{exp.evaluation_config_hash or 'None'}`",
+        f"- **Opponent Pool Config Hash**: `{exp.opponent_pool_config_hash or 'None'}`",
+        f"- **Promotion Config Hash**: `{exp.promotion_config_hash or 'None'}`",
         f"- **Representative Replays**: {', '.join(f'`{r}`' for r in exp.representative_replays) if exp.representative_replays else 'None'}",
         "",
         "## 3. Aggregate Performance",
@@ -89,6 +92,15 @@ def generate_experiment_report(
     )
     for side_name, stats in agg.get("by_side", {}).items():
         lines.append(f"- **{side_name}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L")
+
+    lines.extend(
+        [
+            "",
+            "### By Seed",
+        ]
+    )
+    for seed_str, stats in agg.get("by_seed", {}).items():
+        lines.append(f"- **Seed {seed_str}**: {stats.get('wins', 0)}W - {stats.get('losses', 0)}L")
 
     lines.extend(
         [

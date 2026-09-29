@@ -33,18 +33,28 @@ jobs:
 
       - name: Lint and Format Check (Ruff)
         run: |
-          python -m ruff format --check src tests
-          python -m ruff check src tests
+          python -m ruff format --check src tests scripts
+          python -m ruff check src tests scripts
 
       - name: Static Type Check (Mypy)
         run: |
-          python -m mypy src
+          python -m mypy src tests
 
       - name: Run Test Suite
         run: |
           python -m pytest tests/
 
-      - name: Smoke E2E Verification
+      - name: Run Demonstrate E2E Twice (Isolation & Repeatability)
+        run: |
+          python scripts/demonstrate_e2e.py
+          python scripts/demonstrate_e2e.py
+
+      - name: CLI Verification and Tournament
         run: |
           python -m battlelab doctor
           python -m battlelab config validate
+          python -m battlelab tournament run --workers 2
+
+      - name: Working Tree Cleanliness Check
+        run: |
+          git diff --exit-code

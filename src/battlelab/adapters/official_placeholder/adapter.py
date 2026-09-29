@@ -6,6 +6,7 @@ Contains ZERO fabricated commands, endpoints, or assumptions.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,7 @@ class OfficialPlaceholderAdapter(GameAdapter):
         bot_a: BotArtifact,
         bot_b: BotArtifact,
         work_dir: Path,
+        cancel_event: threading.Event | None = None,
     ) -> MatchResult:
         raise CapabilityNotSupportedError(
             "run_local_match", self.name, "Official game engine not installed."

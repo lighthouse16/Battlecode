@@ -38,21 +38,32 @@ def execute_match_job(
 
     heartbeat_stop = threading.Event()
     lost_lease = threading.Event()
+    cancel_event = threading.Event()
 
     def _heartbeat_loop():
         # Heartbeat at ~1/3 of the lease duration (minimum 10ms for fast tests)
         interval = max(0.010, lease_duration_seconds / 3.0)
-        while not heartbeat_stop.wait(interval):
-            if worker_id and lease_token:
-                renewed = db.renew_lease(
-                    match_id=spec.match_id,
-                    worker_id=worker_id,
-                    lease_token=lease_token,
-                    additional_seconds=lease_duration_seconds,
-                )
-                if not renewed:
-                    lost_lease.set()
-                    break
+        try:
+            while not heartbeat_stop.wait(interval):
+                if worker_id and lease_token:
+                    try:
+                        renewed = db.renew_lease(
+                            match_id=spec.match_id,
+                            worker_id=worker_id,
+                            lease_token=lease_token,
+                            additional_seconds=lease_duration_seconds,
+                        )
+                        if not renewed:
+                            lost_lease.set()
+                            cancel_event.set()
+                            break
+                    except Exception:
+                        lost_lease.set()
+                        cancel_event.set()
+                        break
+        except Exception:
+            lost_lease.set()
+            cancel_event.set()
 
     heartbeat_thread = None
     if worker_id and lease_token:
@@ -104,15 +115,29 @@ def execute_match_job(
 
         adapter = get_adapter(spec.adapter_name)
 
-        # Run match through adapter
+        # Run match through adapter with active cancellation
         result = adapter.run_local_match(
             spec=spec,
             bot_a=bot_a,
             bot_b=bot_b,
             work_dir=work_dir,
+            cancel_event=cancel_event,
         )
 
-        # Process and store replay if present
+        heartbeat_stop.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=0.5)
+
+        if lost_lease.is_set():
+            # Worker was fenced out because another worker claimed the expired lease
+            return {
+                "match_id": spec.match_id,
+                "status": "STALE_ABORTED",
+                "committed": False,
+                "error": "Lease was lost during match execution",
+            }
+
+        # Process and store replay if present (only for authoritative owner)
         if result.replay_path:
             raw_replay_path = Path(result.replay_path)
             try:
@@ -135,19 +160,6 @@ def execute_match_job(
                     evidence=f"Replay storage error: {e}",
                     is_inference=False,
                 )
-
-        heartbeat_stop.set()
-        if heartbeat_thread:
-            heartbeat_thread.join(timeout=0.5)
-
-        if lost_lease.is_set():
-            # Worker was fenced out because another worker claimed the expired lease
-            return {
-                "match_id": spec.match_id,
-                "status": "STALE_ABORTED",
-                "committed": False,
-                "error": "Lease was lost during match execution",
-            }
 
         committed = db.update_match_result(result, lease_token=lease_token)
         res_dict = result.to_dict()

@@ -12,6 +12,7 @@ from battlelab.analysis.metrics import calculate_paired_experiment_metrics
 from battlelab.analysis.report import generate_experiment_report
 from battlelab.bots.registry import BotRegistry
 from battlelab.config.loader import load_yaml_config
+from battlelab.core.hashing import hash_dict
 from battlelab.core.models import ResolvedOpponent
 from battlelab.experiments.registry import ExperimentRegistry
 from battlelab.matches.matrix import generate_paired_experiment_matrix
@@ -73,6 +74,7 @@ class ExperimentEvaluator:
             # Load evaluation configuration
             cfg_path = eval_config_path or "configs/evaluation.yaml"
             cfg = load_yaml_config(cfg_path)
+            eval_config_hash = hash_dict(cfg)
             workers = max_workers or cfg.get("max_workers", 4)
             self.scheduler.max_workers = workers
 
@@ -86,7 +88,13 @@ class ExperimentEvaluator:
             # Load opponent pool
             opp_path = opponent_pool_path or "configs/opponent_pool.yaml"
             opp_cfg = load_yaml_config(opp_path)
+            opponent_pool_config_hash = hash_dict(opp_cfg)
             resolved_opponents = self._ensure_opponent_artifacts(opp_cfg)
+
+            exp.evaluation_config = cfg
+            exp.evaluation_config_hash = eval_config_hash
+            exp.opponent_pool_config = opp_cfg
+            exp.opponent_pool_config_hash = opponent_pool_config_hash
 
             # Fallback to direct head-to-head if pool is empty
             if not resolved_opponents:

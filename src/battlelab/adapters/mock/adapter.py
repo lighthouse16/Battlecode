@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -147,6 +148,7 @@ class MockAdapter(GameAdapter):
         bot_a: BotArtifact,
         bot_b: BotArtifact,
         work_dir: Path,
+        cancel_event: threading.Event | None = None,
     ) -> MatchResult:
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -177,12 +179,14 @@ class MockAdapter(GameAdapter):
             cwd=entry_a.parent,
             env=env_a,
             memory_limit_mb=spec.memory_limit_mb,
+            cancel_event=cancel_event,
         )
         proc_b = BotSubprocess(
             entrypoint_path=entry_b,
             cwd=entry_b.parent,
             env=env_b,
             memory_limit_mb=spec.memory_limit_mb,
+            cancel_event=cancel_event,
         )
 
         # Side assignment
@@ -200,7 +204,21 @@ class MockAdapter(GameAdapter):
             bot_proc_1=proc_1,
             per_turn_limit_ms=spec.per_turn_limit_ms,
             match_wall_clock_limit_ms=spec.match_wall_clock_limit_ms,
+            cancel_event=cancel_event,
         )
+
+        if engine_res.cancelled or (cancel_event and cancel_event.is_set()):
+            return MatchResult(
+                match_id=spec.match_id,
+                outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                duration_ms=engine_res.duration_ms,
+                failure_classification=FailureClassification(
+                    category=FailureCategory.UNKNOWN_INFRASTRUCTURE,
+                    culprit="system",
+                    evidence="Match cancelled due to lost lease",
+                ),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
 
         # Map back to Bot A and Bot B
         score_a = engine_res.score_p0 if bot_0_is_a else engine_res.score_p1

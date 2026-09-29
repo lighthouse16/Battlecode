@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     promotion_decision TEXT NOT NULL DEFAULT 'PENDING',
     rejection_reason TEXT,
     representative_replays_json TEXT NOT NULL DEFAULT '[]',
+    evaluation_config_json TEXT NOT NULL DEFAULT '{}',
+    evaluation_config_hash TEXT NOT NULL DEFAULT '',
+    opponent_pool_config_json TEXT NOT NULL DEFAULT '{}',
+    opponent_pool_config_hash TEXT NOT NULL DEFAULT '',
+    promotion_config_hash TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(baseline_artifact_id) REFERENCES artifacts(artifact_id),
     FOREIGN KEY(challenger_artifact_id) REFERENCES artifacts(artifact_id)
 );
@@ -234,6 +239,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             ("evaluation_config_hash", "TEXT NOT NULL DEFAULT ''"),
             ("opponent_pool_config_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("opponent_pool_config_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("promotion_config_hash", "TEXT NOT NULL DEFAULT ''"),
         ]
         for col_name, col_type in new_exp_cols:
             if col_name not in existing_exp_cols:

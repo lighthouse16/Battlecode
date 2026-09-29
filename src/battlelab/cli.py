@@ -137,10 +137,12 @@ def cmd_bot(args: argparse.Namespace) -> int:
             display_name=args.name,
             language=args.language,
             tags=tags,
+            entrypoint=args.entrypoint,
         )
         print("Registered Bot Artifact:")
         print(f"  Artifact ID:     {art.artifact_id}")
         print(f"  Display Name:    {art.display_name}")
+        print(f"  Entrypoint:      {art.entrypoint_relpath}")
         print(f"  Source Hash:     {art.source_hash}")
         print(f"  Location:        {art.source_location}")
         print(f"  Git Commit:      {art.git_commit or 'None'} (Dirty: {art.dirty_worktree})")
@@ -474,6 +476,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_bot_reg.add_argument("path", help="Path to bot source file or directory")
     p_bot_reg.add_argument("--name", help="Display name")
+    p_bot_reg.add_argument(
+        "--entrypoint", help="Relative path to entrypoint script within bot artifact"
+    )
     p_bot_reg.add_argument("--language", default="python", help="Language/runtime")
     p_bot_reg.add_argument("--tags", help="Comma-separated tags (e.g. policy:fixed,baseline)")
 
