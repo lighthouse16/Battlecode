@@ -535,19 +535,15 @@ def cmd_official(args: argparse.Namespace) -> int:
     elif args.action == "sdk":
         sdk_action = getattr(args, "sdk_action", None)
         if sdk_action == "probe":
-            try:
-                probe = checker.bridge.probe_sdk()
-                if getattr(args, "json", False):
-                    print(json.dumps(probe, indent=2))
-                else:
-                    print(f"Official SDK Probed: {probe}")
-                return 0
-            except Exception as e:
-                if getattr(args, "json", False):
-                    print(json.dumps({"error": str(e), "configured": False}, indent=2))
-                else:
-                    print(f"Official SDK Probe: {e}")
-                return 0
+            from battlelab.official.readiness import probe_engine_executable
+
+            engine_path = getattr(args, "engine_path", None)
+            as_json = getattr(args, "json", False)
+            return probe_engine_executable(
+                engine_path=engine_path,
+                bridge=checker.bridge,
+                as_json=as_json,
+            )
 
     elif args.action == "activate":
         if getattr(args, "dry_run", False):
@@ -568,21 +564,15 @@ def cmd_official(args: argparse.Namespace) -> int:
                         print(f"    - {b}")
             return 0
         else:
-            ack = getattr(args, "acknowledge_sdk", "")
-            if ack != "I_ACKNOWLEDGE_OFFICIAL_SDK_VALIDATION":
-                print("Error: Official activation requires exact acknowledgement flag:")
-                print("  --acknowledge-sdk I_ACKNOWLEDGE_OFFICIAL_SDK_VALIDATION")
-                return 1
-            dry_report = checker.dry_run_activation()
-            if not dry_report["ready"]:
-                print(
-                    f"Error: Cannot activate official adapter. Blockers exist ({dry_report['blockers_count']}):"
-                )
-                for b in dry_report["blockers"]:
-                    print(f"  - {b}")
-                return 1
-            print("Official adapter activated successfully.")
-            return 0
+            msg = (
+                "Non-dry-run activation is not yet implemented: "
+                "persistent official adapter activation is disabled until competition launch."
+            )
+            if getattr(args, "json", False):
+                print(json.dumps({"error": msg, "success": False, "activated": False}, indent=2))
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            return 1
 
     return 1
 
@@ -759,6 +749,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_off_sdk = p_off_sub.add_parser("sdk", help="Official SDK operations")
     p_off_sdk_sub = p_off_sdk.add_subparsers(dest="sdk_action", required=True)
     p_off_sdk_probe = p_off_sdk_sub.add_parser("probe", help="Probe official SDK")
+    p_off_sdk_probe.add_argument(
+        "engine_path",
+        nargs="?",
+        default=None,
+        help="Path to official engine executable to probe",
+    )
     p_off_sdk_probe.add_argument("--json", action="store_true", help="Output probe as JSON")
 
     # activate

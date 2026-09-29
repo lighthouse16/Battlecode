@@ -24,6 +24,14 @@ class OfficialEngineBridge(ABC):
         """Validate whether a game spec satisfies official engine requirements."""
         ...
 
+    def get_sdk_executable(self) -> Path | str | None:
+        """Return the declared path to the SDK executable or launcher script."""
+        return None
+
+    def get_launcher_argv(self) -> list[str]:
+        """Return launcher argv prefix if invoked through an interpreter (e.g. [sys.executable])."""
+        return []
+
     @abstractmethod
     def probe_sdk(self) -> dict[str, Any]:
         """Probe the official SDK installation, version, and supported features."""
@@ -86,6 +94,12 @@ class UnconfiguredOfficialBridge(OfficialEngineBridge):
 
     def validate_spec(self, spec_data: dict[str, Any]) -> tuple[bool, str]:
         return False, "Official competition game specification not completed."
+
+    def get_sdk_executable(self) -> Path | str | None:
+        return None
+
+    def get_launcher_argv(self) -> list[str]:
+        return []
 
     def probe_sdk(self) -> dict[str, Any]:
         raise CapabilityNotSupportedError(

@@ -202,7 +202,21 @@ def ingest_sources(
         with open(manifest_path, "w", encoding="utf-8") as fp:
             json.dump(manifest.to_dict(), fp, indent=2, sort_keys=True)
 
-        os.replace(temp_dir, bundle_dir)
+        # Verify staged bundle completely before publishing
+        _verify_staged_bundle(temp_dir, manifest, bundle_hash, copy_files)
+
+        try:
+            os.replace(temp_dir, bundle_dir)
+        except OSError:
+            # Concurrent publication safety
+            if bundle_dir.exists():
+                existing = load_source_bundle_manifest(bundle_hash, bundles_dir=target_bundles_dir)
+                if [f.to_dict() for f in existing.files] != [f.to_dict() for f in file_records]:
+                    raise FileExistsError(
+                        f"Bundle {bundle_hash} already exists with conflicting entries"
+                    )
+                return existing
+            raise
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
@@ -210,19 +224,104 @@ def ingest_sources(
     return manifest
 
 
+def _verify_staged_bundle(
+    staged_dir: Path,
+    manifest: SourceBundleManifest,
+    expected_hash: str,
+    expect_copied_files: bool,
+) -> None:
+    """Verify complete staged bundle before atomic publication."""
+    import stat
+
+    st = os.lstat(staged_dir)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f"Staged bundle root is invalid: {staged_dir}")
+
+    man_path = staged_dir / "source_manifest.json"
+    if not man_path.is_file():
+        raise ValueError(f"Missing manifest in staged bundle: {man_path}")
+    man_st = os.lstat(man_path)
+    if stat.S_ISLNK(man_st.st_mode) or not stat.S_ISREG(man_st.st_mode):
+        raise ValueError(f"Staged manifest is not a regular file: {man_path}")
+
+    with open(man_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    loaded_manifest = SourceBundleManifest.from_dict(data)
+
+    canonical_items = [
+        {"relpath": f.relpath, "sha256": f.sha256, "size_bytes": f.size_bytes}
+        for f in sorted(loaded_manifest.files, key=lambda x: x.relpath)
+    ]
+    recomputed_hash = hashlib.sha256(
+        json.dumps(canonical_items, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if recomputed_hash != expected_hash:
+        raise ValueError(f"Staged bundle hash mismatch: {recomputed_hash} != {expected_hash}")
+
+    if expect_copied_files:
+        files_dir = staged_dir / "files"
+        if not files_dir.is_dir():
+            raise ValueError(f"Missing files directory in staged bundle: {files_dir}")
+        for entry in manifest.files:
+            target_f = files_dir / Path(entry.relpath)
+            if not target_f.is_file():
+                raise ValueError(f"Staged file missing: {entry.relpath}")
+            f_st = os.lstat(target_f)
+            if stat.S_ISLNK(f_st.st_mode) or not stat.S_ISREG(f_st.st_mode):
+                raise ValueError(f"Staged file cannot be symlink: {entry.relpath}")
+            if f_st.st_size != entry.size_bytes:
+                raise ValueError(f"Staged file size mismatch for {entry.relpath}")
+            if hash_file(target_f) != entry.sha256:
+                raise ValueError(f"Staged file hash mismatch for {entry.relpath}")
+
+
 def load_source_bundle_manifest(
     bundle_hash: str, bundles_dir: Path | None = None
 ) -> SourceBundleManifest:
     """Load and verify an existing source bundle manifest."""
+    # 1. Validate bundle_hash format before ANY filesystem access
+    if (
+        not isinstance(bundle_hash, str)
+        or len(bundle_hash) != 64
+        or not all(c in "0123456789abcdef" for c in bundle_hash)
+    ):
+        raise ValueError(f"Invalid source_bundle_hash format: {bundle_hash!r}")
+
     target_bundles_dir = (
         bundles_dir if bundles_dir is not None else get_official_source_bundles_dir()
     )
+    _check_not_symlink(target_bundles_dir)
+
     bundle_dir = target_bundles_dir / bundle_hash
+    if not bundle_dir.exists():
+        raise FileNotFoundError(f"Source bundle directory not found for hash: {bundle_hash}")
+
+    import stat
+
+    # Reject bundle root symlinks or non-directories
+    st = os.lstat(bundle_dir)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f"Bundle root must be a regular directory, not a symlink: {bundle_dir}")
+
+    # Ensure resolved bundle root remains a direct child of target_bundles_dir
+    try:
+        resolved_bundle = bundle_dir.resolve()
+        resolved_parent = target_bundles_dir.resolve()
+        if resolved_bundle.parent != resolved_parent:
+            raise ValueError(
+                f"Bundle directory traversal or ancestor symlink detected: {bundle_dir}"
+            )
+    except Exception as e:
+        raise ValueError(f"Ancestor path verification failed: {e}") from e
+
     manifest_path = bundle_dir / "source_manifest.json"
-    if not manifest_path.is_file():
+    if not manifest_path.exists():
         raise FileNotFoundError(f"Source bundle manifest not found for hash: {bundle_hash}")
 
     _check_not_symlink(manifest_path)
+    man_st = os.lstat(manifest_path)
+    if not stat.S_ISREG(man_st.st_mode) or stat.S_ISLNK(man_st.st_mode):
+        raise ValueError(f"Manifest path must be a regular file: {manifest_path}")
 
     with open(manifest_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -252,17 +351,25 @@ def load_source_bundle_manifest(
     files_dir = bundle_dir / "files"
     if files_dir.exists():
         _check_not_symlink(files_dir)
-        if not files_dir.is_dir():
+        files_st = os.lstat(files_dir)
+        if not stat.S_ISDIR(files_st.st_mode) or stat.S_ISLNK(files_st.st_mode):
             raise ValueError(f"files path in bundle is not a directory: {files_dir}")
 
         found_relpaths: set[str] = set()
         for root, dirs, filenames in os.walk(files_dir, followlinks=False):
             for d in dirs:
-                _check_not_symlink(Path(root) / d)
+                d_path = Path(root) / d
+                _check_not_symlink(d_path)
+                d_st = os.lstat(d_path)
+                if not stat.S_ISDIR(d_st.st_mode) or stat.S_ISLNK(d_st.st_mode):
+                    raise ValueError(
+                        f"Intermediate directory cannot be symlink or special: {d_path}"
+                    )
             for fn in filenames:
                 fn_path = Path(root) / fn
                 _check_not_symlink(fn_path)
-                if not fn_path.is_file():
+                fn_st = os.lstat(fn_path)
+                if not stat.S_ISREG(fn_st.st_mode) or stat.S_ISLNK(fn_st.st_mode):
                     raise ValueError(f"Non-regular file found in copied source bundle: {fn_path}")
                 rel = fn_path.relative_to(files_dir).as_posix()
                 found_relpaths.add(rel)
@@ -280,12 +387,12 @@ def load_source_bundle_manifest(
         for entry in manifest.files:
             f_path = files_dir / Path(entry.relpath)
             _check_not_symlink(f_path)
-            if not f_path.is_file():
+            f_st = os.lstat(f_path)
+            if not stat.S_ISREG(f_st.st_mode) or stat.S_ISLNK(f_st.st_mode):
                 raise ValueError(f"Copied file is not regular file: {entry.relpath}")
-            st = f_path.stat()
-            if st.st_size != entry.size_bytes:
+            if f_st.st_size != entry.size_bytes:
                 raise ValueError(
-                    f"Copied file size tampered ({entry.relpath}): expected {entry.size_bytes}, got {st.st_size}"
+                    f"Copied file size tampered ({entry.relpath}): expected {entry.size_bytes}, got {f_st.st_size}"
                 )
             actual_sha = hash_file(f_path)
             if actual_sha != entry.sha256:

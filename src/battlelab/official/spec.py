@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,8 +12,149 @@ import yaml
 
 from battlelab.official.models import GameSpec, RuleItem, RuleVerificationState
 from battlelab.official.sources import load_source_bundle_manifest
+from battlelab.storage.paths import get_project_root
 
 SUPPORTED_SCHEMA_VERSIONS = {"1.0.0"}
+
+
+def parse_and_validate_citation(
+    citation: str, valid_bundle_relpaths: set[str] | None = None
+) -> tuple[bool, str, str, str | None]:
+    """Parse and validate strict citation format: <manifest-relpath>[#<fragment>].
+
+    Returns (is_valid, error_msg, relpath, fragment).
+    """
+    if not isinstance(citation, str):
+        return False, f"Citation must be a string, got {type(citation).__name__}", "", None
+    if not citation.strip():
+        return (
+            False,
+            "Citation cannot be empty or whitespace (must match format <manifest-relpath>[#<fragment>])",
+            "",
+            None,
+        )
+
+    if any(c.isspace() for c in citation):
+        return (
+            False,
+            f"Citation '{citation}' cannot contain whitespace (must match format <manifest-relpath>[#<fragment>])",
+            "",
+            None,
+        )
+
+    # Reject backslashes
+    if "\\" in citation:
+        return (
+            False,
+            f"Citation '{citation}' contains backslashes; POSIX slashes required",
+            "",
+            None,
+        )
+
+    # Reject colons
+    if ":" in citation:
+        return (
+            False,
+            f"Citations starting with '#' or ':' are invalid (contains colon): '{citation}'",
+            "",
+            None,
+        )
+
+    # Split by '#'
+    parts = citation.split("#")
+    if len(parts) > 2:
+        return False, f"Citation '{citation}' contains multiple fragment separators ('#')", "", None
+
+    relpath = parts[0]
+    fragment = parts[1] if len(parts) == 2 else None
+
+    # Reject empty relpath (e.g. '#fragment')
+    if not relpath or not relpath.strip():
+        return (
+            False,
+            f"Citations starting with '#' or ':' are invalid (empty manifest-relpath): '{citation}'",
+            "",
+            None,
+        )
+
+    if relpath != relpath.strip():
+        return False, f"Citation '{citation}' has leading or trailing whitespace", "", None
+
+    # Reject absolute paths
+    if relpath.startswith("/"):
+        return False, f"Citation '{citation}' cannot be absolute (has absolute path)", "", None
+
+    # Reject path traversal and empty segments
+    path_segments = relpath.split("/")
+    if any(s in ("..", ".", "") for s in path_segments):
+        if ".." in path_segments:
+            return (
+                False,
+                f"Citation '{citation}' contains traversal (cannot contain '..')",
+                "",
+                None,
+            )
+        return False, f"Citation '{citation}' contains invalid empty or relative segment", "", None
+
+    if valid_bundle_relpaths is not None and relpath not in valid_bundle_relpaths:
+        return (
+            False,
+            f"Citation '{citation}' references file not in source bundle (does not match any file in source bundle manifest): {relpath}",
+            "",
+            None,
+        )
+
+    return True, "", relpath, fragment
+
+
+def validate_pytest_node_id(node_id: str, project_root: Path | None = None) -> tuple[bool, str]:
+    """Validate that node_id is an exact pytest node ID to an existing, collected, non-skipped test."""
+    if not isinstance(node_id, str) or not node_id.strip():
+        return False, f"Invalid test node ID: {node_id!r}"
+    if "::" not in node_id:
+        return (
+            False,
+            f"test_coverage must be a pytest node ID '<file.py>::<test_func>', got '{node_id}'",
+        )
+    parts = node_id.split("::")
+    if len(parts) != 2:
+        return False, f"test_coverage node ID must have exactly one '::', got '{node_id}'"
+    rel_file, func_name = parts
+    if not rel_file.endswith(".py") or not rel_file.strip() or "\\" in rel_file:
+        return False, f"Invalid test file path in node ID: '{rel_file}'"
+    if any(s in ("..", "", ".") for s in rel_file.split("/")):
+        return False, f"Path traversal in test file path: '{rel_file}'"
+    if not func_name.strip() or not func_name.isidentifier():
+        return False, f"Invalid test function name in node ID: '{func_name}'"
+
+    root = project_root if project_root is not None else get_project_root()
+    target_file = root / rel_file
+    if not target_file.exists():
+        return False, f"Referenced test file does not exist: {rel_file}"
+    try:
+        st = os.lstat(target_file)
+        import stat
+
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return False, f"Test file cannot be a symlink or non-regular file: {rel_file}"
+
+        tree = ast.parse(target_file.read_text(encoding="utf-8"), filename=str(target_file))
+        found_func = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+                found_func = True
+                for dec in node.decorator_list:
+                    dec_str = ast.unparse(dec) if hasattr(ast, "unparse") else ""
+                    if "mark.skip" in dec_str or "mark.xfail" in dec_str:
+                        return False, f"Test '{node_id}' is marked as skipped or xfail"
+                break
+        if not found_func:
+            return False, f"Test function '{func_name}' not found in {rel_file}"
+    except Exception as e:
+        return False, f"Failed to inspect test file {rel_file}: {e}"
+
+    return True, ""
+
 
 REQUIRED_RULE_SECTIONS: list[str] = [
     "victory_loss_draw_tiebreak",
@@ -86,6 +229,7 @@ def init_game_spec(
 def validate_game_spec(
     spec_data: dict[str, Any],
     bundles_dir: Path | None = None,
+    project_root: Path | None = None,
 ) -> tuple[bool, list[str], GameSpec | None, bool]:
     """Validate a game specification dictionary.
 
@@ -186,24 +330,51 @@ def validate_game_spec(
             )
             all_sections_activation_ready = False
 
+        meaning = str(item_raw.get("meaning", ""))
+        if state in (
+            RuleVerificationState.DOCUMENTED.value,
+            RuleVerificationState.TEST_VERIFIED.value,
+        ):
+            if not meaning or not meaning.strip():
+                errors.append(
+                    f"rules.{section_name}.meaning: must have non-empty meaning (cannot be empty when verification_state is {state})"
+                )
+
         source_refs = item_raw.get("source_refs", [])
         if not isinstance(source_refs, list) or not all(isinstance(s, str) for s in source_refs):
             errors.append(f"rules.{section_name}.source_refs: must be a list of strings")
             source_refs = []
 
-        # Validate source_refs against real bundle relpaths if bundle is available
-        if valid_bundle_relpaths is not None:
-            for sref in source_refs:
-                ref_clean = sref.split("#")[0].split(":")[0].strip()
-                if ref_clean and ref_clean not in valid_bundle_relpaths:
-                    errors.append(
-                        f"rules.{section_name}.source_refs: reference '{sref}' does not match any file in source bundle manifest"
-                    )
+        # Check duplicate source_refs
+        if len(source_refs) != len(set(source_refs)):
+            errors.append(f"rules.{section_name}.source_refs: contains duplicate citations")
+
+        # Validate each citation format and resolution
+        for sref in source_refs:
+            is_cit_valid, cit_err, relpath, fragment = parse_and_validate_citation(
+                sref, valid_bundle_relpaths
+            )
+            if not is_cit_valid:
+                errors.append(f"rules.{section_name}.source_refs: {cit_err}")
 
         test_cov = item_raw.get("test_coverage", [])
         if not isinstance(test_cov, list) or not all(isinstance(t, str) for t in test_cov):
             errors.append(f"rules.{section_name}.test_coverage: must be a list of strings")
             test_cov = []
+
+        # Check duplicate test_coverage
+        if len(test_cov) != len(set(test_cov)):
+            errors.append(
+                f"rules.{section_name}.test_coverage: contains duplicate test identifiers"
+            )
+
+        # Validate pytest node IDs
+        for tnode in test_cov:
+            is_node_valid, node_err = validate_pytest_node_id(tnode, project_root)
+            if not is_node_valid:
+                if state == RuleVerificationState.TEST_VERIFIED.value:
+                    errors.append(f"rules.{section_name}.test_coverage: {node_err}")
+                all_sections_activation_ready = False
 
         impacts = item_raw.get("implementation_impacts", [])
         if not isinstance(impacts, list) or not all(isinstance(i, str) for i in impacts):
@@ -230,13 +401,25 @@ def validate_game_spec(
             all_sections_activation_ready = False
 
         parsed_rules[section_name] = RuleItem(
-            meaning=str(item_raw.get("meaning", "")),
+            meaning=meaning,
             source_refs=source_refs,
             verification_state=str(state),
             implementation_impacts=impacts,
             test_coverage=test_cov,
             notes=str(item_raw.get("notes", "")),
         )
+
+    # For activation readiness, require non-empty competition_season and sdk_version
+    season = spec_data.get("competition_season", "")
+    if not isinstance(season, str) or not season.strip():
+        all_sections_activation_ready = False
+    ver = spec_data.get("sdk_version", "")
+    if (
+        not isinstance(ver, str)
+        or not ver.strip()
+        or ver.strip().lower() in ("unknown", "missing", "unspecified", "unreleased")
+    ):
+        all_sections_activation_ready = False
 
     is_valid = len(errors) == 0
     spec_obj = None
@@ -261,6 +444,7 @@ def validate_game_spec(
 def load_and_validate_spec(
     spec_path: Path,
     bundles_dir: Path | None = None,
+    project_root: Path | None = None,
 ) -> tuple[bool, list[str], GameSpec | None, bool]:
     """Load spec YAML file and validate it."""
     p = Path(spec_path)
@@ -271,6 +455,6 @@ def load_and_validate_spec(
             data = yaml.safe_load(f)
         if not isinstance(data, dict):
             return False, ["Root YAML document must be a dictionary"], None, False
-        return validate_game_spec(data, bundles_dir=bundles_dir)
+        return validate_game_spec(data, bundles_dir=bundles_dir, project_root=project_root)
     except Exception as e:
         return False, [f"YAML parsing error: {e}"], None, False

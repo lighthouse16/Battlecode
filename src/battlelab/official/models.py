@@ -441,6 +441,70 @@ class ReadinessCheckItem:
 
 
 @dataclass
+class OfficialSDKEvidence:
+    """Cryptographic evidence binding readiness to a verified SDK executable."""
+
+    schema_version: str = "1.0.0"
+    executable_path: str = ""
+    file_type: str = ""
+    executable_sha256: str = ""
+    launcher_argv: list[str] = field(default_factory=list)
+    probe_argv: list[str] = field(default_factory=list)
+    probe_exit_code: int = 0
+    probe_stdout_hash: str = ""
+    probe_stderr_hash: str = ""
+    sdk_version: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OfficialSDKEvidence:
+        return cls(
+            schema_version=str(data.get("schema_version", "1.0.0")),
+            executable_path=str(data.get("executable_path", "")),
+            file_type=str(data.get("file_type", "")),
+            executable_sha256=str(data.get("executable_sha256", "")),
+            launcher_argv=[str(x) for x in data.get("launcher_argv", [])],
+            probe_argv=[str(x) for x in data.get("probe_argv", [])],
+            probe_exit_code=int(data.get("probe_exit_code", 0)),
+            probe_stdout_hash=str(data.get("probe_stdout_hash", "")),
+            probe_stderr_hash=str(data.get("probe_stderr_hash", "")),
+            sdk_version=str(data.get("sdk_version", "")),
+            created_at=str(data.get("created_at", "")),
+        )
+
+
+@dataclass
+class RuleTestEvidence:
+    """Verifiable pytest coverage evidence bound to spec, bundle, executable, and commit."""
+
+    schema_version: str = "1.0.0"
+    spec_hash: str = ""
+    source_bundle_hash: str = ""
+    sdk_executable_sha256: str = ""
+    git_commit: str = ""
+    test_node_ids: list[str] = field(default_factory=list)
+    verified_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RuleTestEvidence:
+        return cls(
+            schema_version=str(data.get("schema_version", "1.0.0")),
+            spec_hash=str(data.get("spec_hash", "")),
+            source_bundle_hash=str(data.get("source_bundle_hash", "")),
+            sdk_executable_sha256=str(data.get("sdk_executable_sha256", "")),
+            git_commit=str(data.get("git_commit", "")),
+            test_node_ids=[str(x) for x in data.get("test_node_ids", [])],
+            verified_at=str(data.get("verified_at", "")),
+        )
+
+
+@dataclass
 class ReadinessReport:
     """Comprehensive readiness assessment."""
 
@@ -452,9 +516,11 @@ class ReadinessReport:
     spec_hash: str | None = None
     sdk_version: str | None = None
     blockers: list[str] = field(default_factory=list)
+    sdk_evidence: OfficialSDKEvidence | None = None
+    test_evidence: RuleTestEvidence | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "ready": self.ready,
             "can_run_local": self.can_run_local,
             "can_submit": self.can_submit,
@@ -464,3 +530,8 @@ class ReadinessReport:
             "blockers": list(self.blockers),
             "checks": [c.to_dict() for c in self.checks],
         }
+        if self.sdk_evidence is not None:
+            d["sdk_evidence"] = self.sdk_evidence.to_dict()
+        if self.test_evidence is not None:
+            d["test_evidence"] = self.test_evidence.to_dict()
+        return d

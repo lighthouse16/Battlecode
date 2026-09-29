@@ -53,37 +53,35 @@ class OfficialAdapter(GameAdapter):
                 False,
                 "Official competition SDK not ingested or configured. See docs/day_zero_rule_ingestion.md.",
             )
+        exe_raw = self.bridge.get_sdk_executable()
+        if exe_raw is None and hasattr(self.bridge, "sdk_path"):
+            exe_raw = getattr(self.bridge, "sdk_path")
+        if exe_raw is None or not str(exe_raw).strip():
+            return False, "Bridge has no declared SDK executable or launcher."
+
+        exe_path = Path(exe_raw)
+        if not exe_path.exists():
+            return False, f"Official SDK executable does not exist: {exe_path}"
+
+        import os
+        import stat
+
         try:
-            probe = self.bridge.probe_sdk()
-            if not isinstance(probe, dict):
-                return False, "probe_sdk() must return a dictionary."
+            st = os.lstat(exe_path)
+            if stat.S_ISLNK(st.st_mode):
+                return False, f"Official SDK executable cannot be a symlink: {exe_path}"
+            if not stat.S_ISREG(st.st_mode):
+                return False, f"Official SDK executable must be a regular file: {exe_path}"
+        except OSError as e:
+            return False, f"Cannot access official SDK executable: {e}"
 
-            # 1. Executable exists
-            if hasattr(self.bridge, "sdk_path"):
-                sdk_p = Path(getattr(self.bridge, "sdk_path"))
-                if not sdk_p.exists():
-                    return False, f"Official SDK executable does not exist: {sdk_p}"
-            exe_exists = bool(probe.get("executable_exists", False))
-            if not exe_exists:
-                return False, "Official SDK executable does not exist."
+        try:
+            from battlelab.official.readiness import generate_sdk_evidence
 
-            # 2. Executable runnable
-            exe_runnable = bool(probe.get("executable_runnable", False))
-            if not exe_runnable:
-                return False, "Official SDK executable is not runnable."
-
-            # 3. Non-empty version obtained from actual execution
-            sdk_version = probe.get("sdk_version")
-            if (
-                not sdk_version
-                or not isinstance(sdk_version, str)
-                or not sdk_version.strip()
-                or sdk_version.strip().lower()
-                in ("unknown", "missing", "unspecified", "unreleased")
-            ):
-                return False, "Official SDK version could not be determined from actual execution."
-
-            return True, f"Official SDK validated: {sdk_version.strip()}"
+            ok, msg, evidence = generate_sdk_evidence(self.bridge, self.command_runner)
+            if not ok or evidence is None:
+                return False, msg
+            return True, f"Official SDK validated: {evidence.sdk_version}"
         except Exception as e:
             return False, f"Official SDK validation failed: {e}"
 
@@ -100,19 +98,33 @@ class OfficialAdapter(GameAdapter):
                 game_version="UNKNOWN",
             )
         try:
-            probe = self.bridge.probe_sdk()
             valid_install, _ = self.validate_installation()
-            # can_run_local requires valid installation and probe evidence
-            can_run_local = valid_install and bool(probe.get("can_run_local", False))
+            if not valid_install:
+                return Capability(
+                    can_run_local=False,
+                    can_run_remote=False,
+                    can_submit=False,
+                    can_fetch_replays=False,
+                    can_list_matches=False,
+                    supported_languages=[],
+                    adapter_version=self.version,
+                    game_version="UNKNOWN",
+                )
+
+            # Derive can_run_local from honest readiness report, never self-reported probe booleans
+            from battlelab.official.readiness import OfficialReadinessChecker
+
+            checker = OfficialReadinessChecker(bridge=self.bridge)
+            report = checker.evaluate()
             return Capability(
-                can_run_local=can_run_local,
+                can_run_local=report.can_run_local,
                 can_run_remote=False,
-                can_submit=False,  # Unconditionally false until explicit audited unlock mechanism exists
-                can_fetch_replays=bool(probe.get("can_fetch_replays", False)),
-                can_list_matches=bool(probe.get("can_list_matches", False)),
-                supported_languages=list(probe.get("supported_languages", [])),
+                can_submit=False,  # Unconditionally false
+                can_fetch_replays=False,
+                can_list_matches=False,
+                supported_languages=["python"] if report.can_run_local else [],
                 adapter_version=self.version,
-                game_version=str(probe.get("game_version", "UNKNOWN")),
+                game_version=report.sdk_version or "UNKNOWN",
             )
         except Exception:
             return Capability(
@@ -143,15 +155,67 @@ class OfficialAdapter(GameAdapter):
         work_dir: Path,
         cancel_event: threading.Event | None = None,
     ) -> MatchResult:
-        # 1. Ensure working directory exists
+        # 1. Validate limits before launching
+        if (
+            isinstance(spec.match_wall_clock_limit_ms, bool)
+            or not isinstance(spec.match_wall_clock_limit_ms, (int, float))
+            or spec.match_wall_clock_limit_ms <= 0
+        ):
+            raise ValueError(
+                f"match_wall_clock_limit_ms must be a positive number, got {spec.match_wall_clock_limit_ms!r}"
+            )
+        if (
+            isinstance(spec.per_turn_limit_ms, bool)
+            or not isinstance(spec.per_turn_limit_ms, (int, float))
+            or spec.per_turn_limit_ms <= 0
+        ):
+            raise ValueError(
+                f"per_turn_limit_ms must be a positive number, got {spec.per_turn_limit_ms!r}"
+            )
+        if (
+            isinstance(spec.memory_limit_mb, bool)
+            or not isinstance(spec.memory_limit_mb, int)
+            or spec.memory_limit_mb < 0
+        ):
+            raise ValueError(
+                f"memory_limit_mb must be a non-negative integer, got {spec.memory_limit_mb!r}"
+            )
+
+        # 2. Ensure working directory exists
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        # 2. Build match command
+        # 3. Build match command
         cmd = self.bridge.build_match_command(spec, bot_a, bot_b, work_dir)
 
-        # 3. Run external process
-        timeout_sec = max(1.0, spec.time_limit_ms / 1000.0)
+        # 4. Verify match command uses the declared SDK executable identity
+        declared_exe = self.bridge.get_sdk_executable()
+        if declared_exe is not None:
+            dec_p = Path(declared_exe).resolve()
+            cmd_resolved = [
+                str(Path(c).resolve()) if (isinstance(c, str) and Path(c).exists()) else str(c)
+                for c in cmd
+            ]
+            if str(dec_p) not in cmd_resolved:
+                return MatchResult(
+                    match_id=spec.match_id,
+                    outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                    winner=None,
+                    score_a=0.0,
+                    score_b=0.0,
+                    turns_played=0,
+                    duration_ms=0.0,
+                    replay_path=None,
+                    replay_hash=None,
+                    failure_classification=FailureClassification(
+                        category=FailureCategory.ENGINE_CRASH,
+                        culprit="engine",
+                        evidence=f"Match command does not invoke verified SDK executable '{dec_p}': {cmd}",
+                    ),
+                )
+
+        # 5. Run external process using match_wall_clock_limit_ms
+        timeout_sec = max(0.1, float(spec.match_wall_clock_limit_ms) / 1000.0)
         cmd_result = self.command_runner.run(
             argv=cmd,
             cwd=work_dir,
@@ -159,7 +223,7 @@ class OfficialAdapter(GameAdapter):
             cancel_event=cancel_event,
         )
 
-        # 4. Handle abnormal process outcomes
+        # 6. Handle abnormal process outcomes
         if cmd_result.timed_out:
             return MatchResult(
                 match_id=spec.match_id,
@@ -174,7 +238,7 @@ class OfficialAdapter(GameAdapter):
                 failure_classification=FailureClassification(
                     category=FailureCategory.TIMEOUT,
                     culprit="engine",
-                    evidence=f"Command exceeded {timeout_sec:.1f}s timeout",
+                    evidence=f"Command exceeded {timeout_sec:.1f}s match wall-clock timeout",
                 ),
             )
 

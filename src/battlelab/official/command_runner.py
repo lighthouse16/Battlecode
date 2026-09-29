@@ -91,15 +91,21 @@ class OfficialCommandRunner:
         dry_run: bool = False,
     ) -> CommandResult:
         """Execute external command with strict security and termination guarantees."""
+
+        def _err(exc_type: type[Exception], msg: str) -> Exception:
+            return exc_type(self._redact(msg, secrets))
+
         # 1. Input validation
         if not argv or not isinstance(argv, (list, tuple)):
-            raise ValueError("argv must be a non-empty list of strings")
+            raise _err(ValueError, "argv must be a non-empty list of strings")
 
         for arg in argv:
             if not isinstance(arg, str):
-                raise TypeError(f"argv elements must be strings, got {type(arg).__name__}")
+                raise _err(
+                    TypeError, f"All argv elements must be strings, got {type(arg).__name__}"
+                )
             if "\0" in arg:
-                raise ValueError("NUL character not permitted in command arguments")
+                raise _err(ValueError, "NUL character not permitted in command arguments")
 
         import math
 
@@ -109,34 +115,63 @@ class OfficialCommandRunner:
             or not math.isfinite(timeout_seconds)
             or timeout_seconds < 0
         ):
-            raise ValueError(
-                f"timeout_seconds must be a finite non-negative number, got {timeout_seconds!r}"
+            raise _err(
+                ValueError,
+                f"timeout_seconds must be a finite non-negative number, got {timeout_seconds!r}",
             )
         if (
             isinstance(stdout_limit_bytes, bool)
             or not isinstance(stdout_limit_bytes, int)
             or stdout_limit_bytes < 0
         ):
-            raise ValueError(
-                f"stdout_limit_bytes must be a non-negative integer, got {stdout_limit_bytes!r}"
+            raise _err(
+                ValueError,
+                f"stdout_limit_bytes must be a non-negative integer, got {stdout_limit_bytes!r}",
             )
         if (
             isinstance(stderr_limit_bytes, bool)
             or not isinstance(stderr_limit_bytes, int)
             or stderr_limit_bytes < 0
         ):
-            raise ValueError(
-                f"stderr_limit_bytes must be a non-negative integer, got {stderr_limit_bytes!r}"
+            raise _err(
+                ValueError,
+                f"stderr_limit_bytes must be a non-negative integer, got {stderr_limit_bytes!r}",
             )
 
         cwd_path = Path(cwd)
-        if not cwd_path.exists() or not cwd_path.is_dir():
-            raise ValueError(f"Working directory does not exist or is not a directory: {cwd_path}")
+        if not cwd_path.exists():
+            raise _err(FileNotFoundError, f"Working directory does not exist: {cwd_path}")
+        if not cwd_path.is_dir():
+            raise _err(NotADirectoryError, f"Working directory is not a directory: {cwd_path}")
 
-        # 2. Redacted argv representation
+        # 2. Filter and validate environment variables BEFORE dry-run
+        filtered_env: dict[str, str] = {}
+        for var_name in self.allowed_env_vars:
+            if var_name in os.environ:
+                filtered_env[var_name] = os.environ[var_name]
+        filtered_env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        if env is not None:
+            if not isinstance(env, dict):
+                raise _err(TypeError, "env must be a dictionary")
+            for k, v in env.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise _err(TypeError, "env variable names and values must be strings")
+                if "\0" in k or "\0" in v:
+                    raise _err(
+                        ValueError,
+                        "NUL character not permitted in environment variable name or value",
+                    )
+                if k not in self.allowed_env_vars:
+                    raise _err(
+                        ValueError, f"Environment variable '{k}' is not permitted by allowlist"
+                    )
+                filtered_env[k] = v
+
+        # 3. Redacted argv representation
         redacted_argv = [self._redact(a, secrets) for a in argv]
 
-        # 3. Dry run mode
+        # 4. Dry run mode
         if dry_run:
             return CommandResult(
                 argv=redacted_argv,
@@ -149,27 +184,6 @@ class OfficialCommandRunner:
                 stdout_truncated=False,
                 stderr_truncated=False,
             )
-
-        # 4. Filter environment variables
-        filtered_env: dict[str, str] = {}
-        for var_name in self.allowed_env_vars:
-            if var_name in os.environ:
-                filtered_env[var_name] = os.environ[var_name]
-        filtered_env["PYTHONDONTWRITEBYTECODE"] = "1"
-
-        if env is not None:
-            if not isinstance(env, dict):
-                raise TypeError("env must be a dictionary")
-            for k, v in env.items():
-                if not isinstance(k, str) or not isinstance(v, str):
-                    raise TypeError("env variable names and values must be strings")
-                if "\0" in k or "\0" in v:
-                    raise ValueError(
-                        "NUL character not permitted in environment variable name or value"
-                    )
-                if k not in self.allowed_env_vars:
-                    raise ValueError(f"Environment variable '{k}' is not permitted by allowlist")
-                filtered_env[k] = v
 
         # 5. Launch process
         popen_kwargs: dict[str, Any] = {
@@ -186,8 +200,7 @@ class OfficialCommandRunner:
         try:
             proc = subprocess.Popen(argv, **popen_kwargs)
         except Exception as e:
-            redacted_err = self._redact(str(e), secrets)
-            raise RuntimeError(f"Failed to start command: {redacted_err}") from None
+            raise _err(RuntimeError, f"Failed to start command: {e}") from None
 
         # 6. Stream capture threads
         stdout_chunks: list[bytes] = []

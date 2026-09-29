@@ -1,15 +1,298 @@
-"""Readiness evaluation and capability assessment for official competition integration."""
-
-from __future__ import annotations
-
+import hashlib
+import json
+import os
+import platform
+import stat
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from battlelab.official.bridge import OfficialEngineBridge, UnconfiguredOfficialBridge
-from battlelab.official.models import ReadinessCheckItem, ReadinessReport
-from battlelab.official.sources import load_source_bundle_manifest
+from battlelab.official.command_runner import OfficialCommandRunner
+from battlelab.official.models import (
+    OfficialSDKEvidence,
+    ReadinessCheckItem,
+    ReadinessReport,
+    RuleTestEvidence,
+)
+from battlelab.official.sources import hash_file, load_source_bundle_manifest
 from battlelab.official.spec import load_and_validate_spec
 from battlelab.storage.paths import get_project_root
+
+
+def generate_sdk_evidence(
+    bridge: OfficialEngineBridge,
+    command_runner: OfficialCommandRunner | None = None,
+) -> tuple[bool, str, OfficialSDKEvidence | None]:
+    """Cryptographically inspect and probe the bridge's declared SDK executable."""
+    if isinstance(bridge, UnconfiguredOfficialBridge):
+        return False, "Official competition SDK is unconfigured.", None
+
+    exe_raw = bridge.get_sdk_executable()
+    if exe_raw is None or not str(exe_raw).strip():
+        return False, "Bridge has no declared SDK executable or launcher.", None
+
+    exe_path = Path(exe_raw)
+    if not exe_path.exists():
+        return False, f"Declared SDK executable does not exist: {exe_path}", None
+
+    try:
+        st = os.lstat(exe_path)
+        if stat.S_ISLNK(st.st_mode):
+            return False, f"Declared SDK executable cannot be a symlink: {exe_path}", None
+        if not stat.S_ISREG(st.st_mode):
+            return False, f"Declared SDK executable must be a regular file: {exe_path}", None
+    except OSError as e:
+        return False, f"Failed to inspect SDK executable with lstat: {e}", None
+
+    launcher_argv = bridge.get_launcher_argv()
+    if launcher_argv:
+        launcher_bin = Path(launcher_argv[0])
+        if not launcher_bin.exists():
+            return False, f"Launcher binary does not exist: {launcher_bin}", None
+        try:
+            l_st = os.lstat(launcher_bin)
+            if stat.S_ISLNK(l_st.st_mode) or not stat.S_ISREG(l_st.st_mode):
+                return (
+                    False,
+                    f"Launcher binary must be regular non-symlink file: {launcher_bin}",
+                    None,
+                )
+            if platform.system() != "Windows" and not os.access(launcher_bin, os.X_OK):
+                return False, f"Launcher binary is not executable: {launcher_bin}", None
+        except OSError as e:
+            return False, f"Failed to inspect launcher binary: {e}", None
+        probe_argv = list(launcher_argv) + [str(exe_path), "probe"]
+    else:
+        if platform.system() != "Windows":
+            if not os.access(exe_path, os.X_OK):
+                return False, f"SDK executable is not executable: {exe_path}", None
+        else:
+            ext = exe_path.suffix.lower()
+            pathext = [
+                e.lower() for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+            ]
+            if ext not in pathext:
+                return (
+                    False,
+                    f"SDK executable has non-executable extension on Windows: {ext}",
+                    None,
+                )
+        probe_argv = [str(exe_path), "probe"]
+
+    exe_sha256 = hash_file(exe_path)
+
+    runner = command_runner if command_runner is not None else OfficialCommandRunner()
+    try:
+        res = runner.run(probe_argv, cwd=exe_path.parent, timeout_seconds=10.0)
+    except Exception as e:
+        return False, f"SDK version probe failed to execute: {e}", None
+
+    if res.timed_out:
+        return False, f"SDK version probe timed out after 10s: {probe_argv}", None
+    if res.exit_code != 0:
+        return (
+            False,
+            f"SDK version probe failed with exit code {res.exit_code}: {res.stderr}",
+            None,
+        )
+
+    probe_out_hash = hashlib.sha256(res.stdout.encode("utf-8")).hexdigest()
+    probe_err_hash = hashlib.sha256(res.stderr.encode("utf-8")).hexdigest()
+
+    detected_ver = ""
+    try:
+        probe_data = json.loads(res.stdout)
+        if isinstance(probe_data, dict):
+            detected_ver = str(probe_data.get("sdk_version", "")).strip()
+    except Exception:
+        for line in res.stdout.splitlines():
+            line_str = line.strip()
+            if line_str:
+                detected_ver = line_str
+                break
+
+    if not detected_ver or detected_ver.lower() in (
+        "unknown",
+        "missing",
+        "unspecified",
+        "unreleased",
+    ):
+        return (
+            False,
+            f"SDK version probe returned empty or invalid version: {detected_ver!r}",
+            None,
+        )
+
+    evidence = OfficialSDKEvidence(
+        schema_version="1.0.0",
+        executable_path=str(exe_path.resolve()),
+        file_type="regular_file",
+        executable_sha256=exe_sha256,
+        launcher_argv=list(launcher_argv),
+        probe_argv=probe_argv,
+        probe_exit_code=res.exit_code,
+        probe_stdout_hash=probe_out_hash,
+        probe_stderr_hash=probe_err_hash,
+        sdk_version=detected_ver,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return True, f"Verified SDK {detected_ver} at {exe_path.name}", evidence
+
+
+def probe_engine_executable(
+    engine_path: str | None,
+    bridge: OfficialEngineBridge | None = None,
+    as_json: bool = False,
+) -> int:
+    """Truthfully probe an engine executable or configured bridge."""
+    runner = OfficialCommandRunner()
+
+    if engine_path is not None:
+        p = Path(engine_path)
+        if not p.exists():
+            msg = f"Official SDK executable does not exist: {p}"
+            if as_json:
+                print(json.dumps({"error": msg, "success": False, "configured": False}, indent=2))
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
+        try:
+            st = os.lstat(p)
+            if stat.S_ISLNK(st.st_mode):
+                msg = f"Official SDK executable cannot be a symlink: {p}"
+                if as_json:
+                    print(
+                        json.dumps({"error": msg, "success": False, "configured": False}, indent=2)
+                    )
+                else:
+                    print(f"Error: {msg}", file=sys.stderr)
+                return 1
+            if not stat.S_ISREG(st.st_mode):
+                msg = f"Official SDK executable must be a regular file: {p}"
+                if as_json:
+                    print(
+                        json.dumps({"error": msg, "success": False, "configured": False}, indent=2)
+                    )
+                else:
+                    print(f"Error: {msg}", file=sys.stderr)
+                return 1
+        except OSError as e:
+            msg = f"Cannot access official SDK executable: {e}"
+            if as_json:
+                print(json.dumps({"error": msg, "success": False, "configured": False}, indent=2))
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
+        exe_sha256 = hash_file(p)
+
+        if p.suffix == ".py":
+            cmd = [sys.executable, str(p), "probe"]
+        else:
+            cmd = [str(p), "probe"]
+
+        res = runner.run(cmd, cwd=p.parent, timeout_seconds=10.0)
+        if res.exit_code != 0 or res.timed_out:
+            msg = f"Official SDK probe command failed with exit code {res.exit_code}: {res.stderr}"
+            if as_json:
+                print(
+                    json.dumps(
+                        {
+                            "error": msg,
+                            "success": False,
+                            "exit_code": res.exit_code,
+                            "stderr": res.stderr,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
+        detected_ver = ""
+        try:
+            d = json.loads(res.stdout)
+            if isinstance(d, dict):
+                detected_ver = str(d.get("sdk_version", "")).strip()
+        except Exception:
+            for line in res.stdout.splitlines():
+                if line.strip():
+                    detected_ver = line.strip()
+                    break
+
+        if not detected_ver or detected_ver.lower() in (
+            "unknown",
+            "missing",
+            "unspecified",
+            "unreleased",
+        ):
+            msg = f"Official SDK version could not be determined from probe output: {res.stdout}"
+            if as_json:
+                print(json.dumps({"error": msg, "success": False, "stdout": res.stdout}, indent=2))
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
+        out_data = {
+            "success": True,
+            "executable_path": str(p.resolve()),
+            "executable_sha256": exe_sha256,
+            "sdk_version": detected_ver,
+            "command_evidence": {
+                "argv": res.argv,
+                "exit_code": res.exit_code,
+                "stdout_hash": hashlib.sha256(res.stdout.encode("utf-8")).hexdigest(),
+                "stderr_hash": hashlib.sha256(res.stderr.encode("utf-8")).hexdigest(),
+            },
+        }
+        if as_json:
+            print(json.dumps(out_data, indent=2))
+        else:
+            print(
+                f"Official SDK Probed:\n  Path:    {p}\n  Hash:    {exe_sha256}\n  Version: {detected_ver}"
+            )
+        return 0
+
+    # engine_path is None: probe configured bridge
+    if bridge is None or isinstance(bridge, UnconfiguredOfficialBridge):
+        msg = "Official SDK is unconfigured and no engine_path argument was provided."
+        if as_json:
+            print(json.dumps({"error": msg, "configured": False, "success": False}, indent=2))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 1
+
+    ok, msg, evidence = generate_sdk_evidence(bridge, runner)
+    if not ok or evidence is None:
+        if as_json:
+            print(json.dumps({"error": msg, "configured": False, "success": False}, indent=2))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 1
+
+    out_data = {
+        "success": True,
+        "executable_path": evidence.executable_path,
+        "executable_sha256": evidence.executable_sha256,
+        "sdk_version": evidence.sdk_version,
+        "command_evidence": {
+            "argv": evidence.probe_argv,
+            "exit_code": evidence.probe_exit_code,
+            "stdout_hash": evidence.probe_stdout_hash,
+            "stderr_hash": evidence.probe_stderr_hash,
+        },
+    }
+    if as_json:
+        print(json.dumps(out_data, indent=2))
+    else:
+        print(
+            f"Official SDK Probed:\n  Path:    {evidence.executable_path}\n  Hash:    {evidence.executable_sha256}\n  Version: {evidence.sdk_version}"
+        )
+    return 0
 
 
 class OfficialReadinessChecker:
@@ -39,11 +322,13 @@ class OfficialReadinessChecker:
         spec_obj = None
         rules_test_verified = False
 
+        spec_bundle_hash: str | None = None
         if self.spec_path.is_file():
             is_valid, errors, spec_obj, is_ready = load_and_validate_spec(self.spec_path)
             spec_valid = is_valid
             if is_valid and spec_obj:
                 spec_hash = spec_obj.canonical_hash()
+                spec_bundle_hash = spec_obj.source_bundle_hash
                 unverified_rules = [
                     k
                     for k, v in spec_obj.rules.items()
@@ -52,6 +337,18 @@ class OfficialReadinessChecker:
                     or not v.test_coverage
                 ]
                 rules_test_verified = len(unverified_rules) == 0 and len(spec_obj.rules) == 23
+            else:
+                try:
+                    import yaml
+
+                    with open(self.spec_path, "r", encoding="utf-8") as f:
+                        raw_data = yaml.safe_load(f)
+                    if isinstance(raw_data, dict):
+                        sbh = raw_data.get("source_bundle_hash")
+                        if isinstance(sbh, str) and sbh.strip():
+                            spec_bundle_hash = sbh.strip()
+                except Exception:
+                    pass
             spec_err_str = f"Spec errors: {len(errors)}" if errors else "Valid"
         else:
             spec_err_str = f"Spec file not found at {self.spec_path}"
@@ -81,13 +378,24 @@ class OfficialReadinessChecker:
         )
 
         # 2. Source bundle verification (strictly from spec or explicit hash, never iterdir)
+        bundle_conflict = False
+        if self.source_bundle_hash and spec_bundle_hash:
+            if self.source_bundle_hash != spec_bundle_hash:
+                bundle_conflict = True
+
         bundle_hash_found: str | None = self.source_bundle_hash
-        if not bundle_hash_found and spec_obj and spec_obj.source_bundle_hash:
-            bundle_hash_found = spec_obj.source_bundle_hash
+        if not bundle_hash_found and spec_bundle_hash:
+            bundle_hash_found = spec_bundle_hash
 
         bundle_ok = False
         bundle_detail = "No source bundle hash specified or referenced by game spec."
-        if bundle_hash_found:
+        if bundle_conflict and spec_bundle_hash:
+            bundle_ok = False
+            bundle_detail = (
+                f"Explicit source bundle hash '{self.source_bundle_hash}' differs from "
+                f"game spec source bundle hash '{spec_bundle_hash}'"
+            )
+        elif bundle_hash_found:
             try:
                 manifest = load_source_bundle_manifest(bundle_hash_found)
                 bundle_ok = True
@@ -116,35 +424,39 @@ class OfficialReadinessChecker:
         sdk_version_matches = False
         maps_discovered = False
         discovered_maps: list[str] = []
+        sdk_evidence: OfficialSDKEvidence | None = None
 
         if not isinstance(self.bridge, UnconfiguredOfficialBridge):
-            try:
-                probe_res = self.bridge.probe_sdk()
+            exe_raw = self.bridge.get_sdk_executable()
+            if exe_raw is not None and str(exe_raw).strip():
                 sdk_configured = True
-                sdk_exists = bool(probe_res.get("executable_exists", False))
-                if hasattr(self.bridge, "sdk_path"):
-                    sdk_exists = sdk_exists and Path(getattr(self.bridge, "sdk_path")).exists()
-                sdk_runnable = bool(probe_res.get("executable_runnable", False))
-                ver = probe_res.get("sdk_version")
-                if (
-                    ver
-                    and isinstance(ver, str)
-                    and ver.strip()
-                    and ver.strip().lower()
-                    not in ("unknown", "missing", "unspecified", "unreleased")
-                ):
-                    sdk_probed = True
-                    sdk_version = ver.strip()
+                exe_p = Path(exe_raw)
+                try:
+                    st = os.lstat(exe_p)
+                    if not stat.S_ISLNK(st.st_mode) and stat.S_ISREG(st.st_mode):
+                        sdk_exists = True
+                except OSError:
+                    pass
+
+            ok, msg, evidence = generate_sdk_evidence(self.bridge)
+            if ok and evidence is not None:
+                sdk_evidence = evidence
+                sdk_configured = True
+                sdk_exists = True
+                sdk_runnable = True
+                sdk_probed = True
+                sdk_version = evidence.sdk_version
 
                 configured_ver = spec_obj.sdk_version if spec_obj and spec_obj.sdk_version else None
                 sdk_version_matches = bool(
-                    sdk_probed and (not configured_ver or configured_ver == sdk_version)
+                    configured_ver is not None and configured_ver == sdk_version
                 )
 
-                discovered_maps = self.bridge.discover_maps()
-                maps_discovered = len(discovered_maps) > 0
-            except Exception:
-                sdk_configured = False
+                try:
+                    discovered_maps = self.bridge.discover_maps()
+                    maps_discovered = len(discovered_maps) > 0
+                except Exception:
+                    maps_discovered = False
 
         checks.append(
             ReadinessCheckItem(
@@ -275,6 +587,8 @@ class OfficialReadinessChecker:
                             map_name=map_name,
                             seed=1337,
                             time_limit_ms=5000,
+                            match_wall_clock_limit_ms=30000,
+                            per_turn_limit_ms=5000,
                         )
                         adapter = OfficialAdapter(bridge=self.bridge)
                         res1 = adapter.run_local_match(spec1, bot_art, bot_art, tmp_dir / "match1")
@@ -311,6 +625,8 @@ class OfficialReadinessChecker:
                                         map_name=map_name,
                                         seed=1337,
                                         time_limit_ms=5000,
+                                        match_wall_clock_limit_ms=30000,
+                                        per_turn_limit_ms=5000,
                                     )
                                     res2 = adapter.run_local_match(
                                         spec2, bot_art, bot_art, tmp_dir / "match2"
@@ -415,6 +731,28 @@ class OfficialReadinessChecker:
         can_submit = False  # Strictly False until release
         ready = (len(blockers) == 0) and can_run_local
 
+        # Construct RuleTestEvidence if tests verified and SDK bound
+        test_evidence: RuleTestEvidence | None = None
+        if rules_test_verified and spec_obj and sdk_evidence and bundle_ok and bundle_hash_found:
+            all_node_ids: list[str] = []
+            for r in spec_obj.rules.values():
+                all_node_ids.extend(r.test_coverage)
+            all_node_ids = sorted(set(all_node_ids))
+
+            from battlelab.bots.artifacts import check_git_status
+
+            git_commit, _ = check_git_status(get_project_root())
+
+            test_evidence = RuleTestEvidence(
+                schema_version="1.0.0",
+                spec_hash=spec_hash or "",
+                source_bundle_hash=bundle_hash_found,
+                sdk_executable_sha256=sdk_evidence.executable_sha256,
+                git_commit=git_commit or "unknown",
+                test_node_ids=all_node_ids,
+                verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+
         return ReadinessReport(
             ready=ready,
             can_run_local=can_run_local,
@@ -424,6 +762,8 @@ class OfficialReadinessChecker:
             spec_hash=spec_hash,
             sdk_version=sdk_version,
             blockers=blockers,
+            sdk_evidence=sdk_evidence,
+            test_evidence=test_evidence,
         )
 
     def dry_run_activation(self) -> dict[str, Any]:
@@ -437,6 +777,8 @@ class OfficialReadinessChecker:
             "source_bundle_hash": report.source_bundle_hash,
             "spec_hash": report.spec_hash,
             "sdk_version": report.sdk_version,
+            "sdk_evidence": report.sdk_evidence.to_dict() if report.sdk_evidence else None,
+            "test_evidence": report.test_evidence.to_dict() if report.test_evidence else None,
             "capabilities_to_activate": {
                 "can_run_local": report.can_run_local,
                 "can_submit": False,

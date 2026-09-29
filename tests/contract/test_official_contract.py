@@ -36,9 +36,20 @@ class FakeOfficialBridge(OfficialEngineBridge):
     SYNTHETIC TEST FIXTURE — NOT AN OFFICIAL COMPETITION INTERFACE.
     """
 
-    def __init__(self, sdk_path: Path = SYNTHETIC_SDK_PATH) -> None:
+    def __init__(self, sdk_path: Path = SYNTHETIC_SDK_PATH, is_test_fixture: bool = True) -> None:
+        if not is_test_fixture:
+            raise RuntimeError(
+                "FakeOfficialBridge is strictly a test fixture and cannot be used in production"
+            )
+        self.is_test_fixture = True
         self.sdk_path = sdk_path
         self.runner = OfficialCommandRunner()
+
+    def get_sdk_executable(self) -> Path:
+        return self.sdk_path
+
+    def get_launcher_argv(self) -> list[str]:
+        return [sys.executable]
 
     def validate_spec(self, spec_data: dict[str, Any]) -> tuple[bool, str]:
         return True, "Synthetic spec valid"
@@ -335,6 +346,7 @@ def test_fake_official_adapter_timeout(tmp_path: Path):
         map_name="synth_grid_8x8",
         seed=42,
         time_limit_ms=500,  # 0.5s timeout vs 5s sleep in engine
+        match_wall_clock_limit_ms=500,
     )
 
     res = adapter.run_local_match(spec, bot_a, bot_b, tmp_path)
