@@ -230,7 +230,7 @@ def test_7_deleted_artifact_file_fails_integrity(tmp_path: Path):
     snapshot_dir = Path(bot.source_location)
     helper = snapshot_dir / "helper.py"
     if helper.exists():
-        os.chmod(helper, stat.S_IWRITE)
+        os.chmod(helper, stat.S_IWRITE | stat.S_IREAD)
         helper.unlink()
 
     ok, err = verify_artifact_integrity(bot)
@@ -538,11 +538,11 @@ def test_19_manifest_forgery_attacks_rejected(tmp_path: Path):
 
     # Attack 1: Modify file content and forge manifest file hash + internal manifest_hash
     main_file = snap_dir / "main.py"
-    os.chmod(main_file, stat.S_IWRITE)
+    os.chmod(main_file, stat.S_IWRITE | stat.S_IREAD)
     main_file.write_text("print('tampered')", encoding="utf-8")
     new_main_hash = hash_file(main_file)
 
-    os.chmod(manifest_file, stat.S_IWRITE)
+    os.chmod(manifest_file, stat.S_IWRITE | stat.S_IREAD)
     m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
     m_data["files"]["main.py"] = {
         "sha256": new_main_hash,
@@ -852,7 +852,7 @@ def test_26_pre_promotion_integrity_blocks_tampered_bot(tmp_path: Path):
 
     # Tamper with baseline artifact
     base_file = Path(b.source_location) / b.entrypoint_relpath
-    os.chmod(base_file, stat.S_IWRITE)
+    os.chmod(base_file, stat.S_IWRITE | stat.S_IREAD)
     base_file.write_text("print('tampered baseline')", encoding="utf-8")
 
     gate = PromotionGate(db)
