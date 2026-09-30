@@ -1,0 +1,207 @@
+schema_version: 1
+event_name: Cambridge Battlecode Autumn 2026
+timezone: Asia/Hong_Kong
+objective: Qualify as one of the eight International finalists
+operator: Dang
+
+# Dates are intentionally day-precision unless the organizer has published an exact time.
+# Never infer a lock time from these dates; confirm it from the official source on the day.
+stages:
+  - id: prelaunch
+    name: Pre-launch readiness
+    starts_on: 2026-09-30
+    deadline_on: 2026-10-11
+    deadline_time_confirmed: false
+    promotion_profile: prelaunch
+    freeze_changes_hours_before_deadline: 0
+    steps:
+      - id: registration_confirmed
+        title: Confirm registration and International eligibility
+        kind: manual
+        evidence_required: true
+      - id: ai_policy_recorded
+        title: Record the authoritative AI policy
+        kind: manual
+        evidence_required: true
+      - id: baseline_ci_green
+        title: Verify the clean pre-launch commit is green on GitHub Actions
+        kind: command
+        command: python -m pytest tests/
+        evidence_required: true
+      - id: fail_closed_verified
+        title: Verify official integration remains fail-closed before release
+        kind: command
+        command: python -m battlelab official status --check
+        expected_exit_codes: [1]
+        evidence_required: true
+
+  - id: sprint_1
+    name: Launch and Sprint 1
+    starts_on: 2026-10-12
+    deadline_on: 2026-10-17
+    deadline_time_confirmed: false
+    promotion_profile: exploration
+    freeze_changes_hours_before_deadline: 12
+    steps:
+      - id: sources_ingested
+        title: Ingest and hash the official rules and SDK documentation
+        kind: command
+        command: python -m battlelab official ingest <OFFICIAL_SOURCE_PATH> --copy --json
+        evidence_required: true
+      - id: spec_test_verified
+        title: Complete the source-backed game specification and rule tests
+        kind: command
+        command: python -m battlelab official spec validate configs/game_spec.yaml --json
+        evidence_required: true
+      - id: sdk_probed
+        title: Probe the declared official SDK executable
+        kind: command
+        command: python -m battlelab official sdk probe <SDK_EXECUTABLE> --json
+        evidence_required: true
+      - id: local_activation_ready
+        title: Pass the official local-execution readiness gate
+        kind: command
+        command: python -m battlelab official readiness --check --json
+        evidence_required: true
+      - id: first_ladder_submission
+        title: Submit the first stable legal bot and archive the receipt
+        kind: manual
+        evidence_required: true
+
+  - id: sprint_2
+    name: Sprint 2 robustness
+    starts_on: 2026-10-18
+    deadline_on: 2026-10-24
+    deadline_time_confirmed: false
+    promotion_profile: exploration
+    freeze_changes_hours_before_deadline: 12
+    steps:
+      - id: opponent_snapshots_archived
+        title: Archive representative opponent and ladder snapshots
+        kind: manual
+        evidence_required: true
+      - id: failure_clusters_reviewed
+        title: Review replay failure clusters and select one falsifiable hypothesis
+        kind: manual
+        evidence_required: true
+      - id: broad_validation_passed
+        title: Pass multi-map, seed, side, and opponent-group validation
+        kind: command
+        command: python -m battlelab experiment promote <EXPERIMENT_ID> --dry-run
+        evidence_required: true
+
+  - id: sprint_3
+    name: Sprint 3 consolidation
+    starts_on: 2026-10-25
+    deadline_on: 2026-10-31
+    deadline_time_confirmed: false
+    promotion_profile: consolidation
+    freeze_changes_hours_before_deadline: 18
+    steps:
+      - id: holdout_evaluated
+        title: Evaluate the champion on the sealed qualification holdout
+        kind: manual
+        evidence_required: true
+      - id: rollback_verified
+        title: Verify the previous stable champion can be restored
+        kind: command
+        command: python -m battlelab champion status
+        evidence_required: true
+      - id: qualifier_candidate_selected
+        title: Select one qualifier champion and one rollback candidate
+        kind: manual
+        evidence_required: true
+
+  - id: qualifier_freeze
+    name: International qualifier freeze
+    starts_on: 2026-11-01
+    deadline_on: 2026-11-03
+    deadline_time_confirmed: false
+    promotion_profile: qualification
+    freeze_changes_hours_before_deadline: 24
+    steps:
+      - id: official_readiness_green
+        title: Pass all official readiness checks
+        kind: command
+        command: python -m battlelab official readiness --check --json
+        evidence_required: true
+      - id: release_candidate_frozen
+        title: Freeze and verify the qualification release candidate
+        kind: command
+        command: python -m battlelab competition release freeze --artifact <ARTIFACT_ID> --experiment <EXPERIMENT_ID> --actor Dang --reviewed-commit <GIT_SHA> --ci-run-url <CI_URL> --acknowledge I_ACKNOWLEDGE_RELEASE_FREEZE
+        evidence_required: true
+      - id: qualifier_rehearsal_passed
+        title: Complete a clean-machine qualifier rehearsal and rollback drill
+        kind: manual
+        evidence_required: true
+
+  - id: international_qualifier
+    name: International qualifier
+    starts_on: 2026-11-04
+    deadline_on: 2026-11-04
+    deadline_time_confirmed: false
+    promotion_profile: qualification
+    freeze_changes_hours_before_deadline: 0
+    steps:
+      - id: release_reverified
+        title: Reverify the frozen release candidate immediately before submission
+        kind: command
+        command: python -m battlelab competition release verify latest
+        evidence_required: true
+      - id: submission_receipt_archived
+        title: Submit manually and archive the official receipt
+        kind: manual
+        evidence_required: true
+
+  - id: finals_prep
+    name: Finals preparation
+    starts_on: 2026-11-05
+    deadline_on: 2026-11-17
+    deadline_time_confirmed: false
+    promotion_profile: finals
+    freeze_changes_hours_before_deadline: 24
+    steps:
+      - id: finalist_field_archived
+        title: Archive the finalist field and representative public evidence
+        kind: manual
+        evidence_required: true
+      - id: core_regression_gate_passed
+        title: Revalidate the robust core before adding matchup adaptations
+        kind: command
+        command: python -m battlelab experiment promote <EXPERIMENT_ID> --dry-run
+        evidence_required: true
+      - id: finals_release_frozen
+        title: Freeze and verify the finals release candidate
+        kind: manual
+        evidence_required: true
+
+  - id: finals
+    name: In-person finals
+    starts_on: 2026-11-18
+    deadline_on: 2026-11-18
+    deadline_time_confirmed: false
+    promotion_profile: finals
+    freeze_changes_hours_before_deadline: 0
+    steps:
+      - id: final_release_reverified
+        title: Reverify the frozen finals release candidate
+        kind: command
+        command: python -m battlelab competition release verify latest
+        evidence_required: true
+      - id: final_submission_receipt_archived
+        title: Submit manually and archive the official receipt
+        kind: manual
+        evidence_required: true
+
+operating_policy:
+  maximum_active_challengers: 1
+  maximum_strategy_archetypes: 3
+  require_github_ci_for_release: true
+  require_clean_worktree_for_release: true
+  require_synced_upstream_for_release: true
+  require_official_readiness_for_release: true
+  require_champion_match_for_release: true
+  require_promoted_experiment_for_release: true
+  exact_release_acknowledgement: I_ACKNOWLEDGE_RELEASE_FREEZE
+  exact_plan_change_acknowledgement: I_ACKNOWLEDGE_COMPETITION_PLAN_CHANGE
+  submission_is_manual: true
