@@ -231,7 +231,10 @@ class OfficialCommandRunner:
                         import resource
 
                         lim = int(memory_limit_mb) * 1024 * 1024
-                        resource.setrlimit(resource.RLIMIT_AS, (lim, lim))  # type: ignore[attr-defined]
+                        setrlimit = getattr(resource, "setrlimit", None)
+                        rlimit_as = getattr(resource, "RLIMIT_AS", None)
+                        if setrlimit is not None and rlimit_as is not None:
+                            setrlimit(rlimit_as, (lim, lim))
                     except Exception:
                         pass
 
