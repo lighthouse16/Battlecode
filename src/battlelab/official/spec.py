@@ -409,7 +409,7 @@ def validate_game_spec(
             notes=str(item_raw.get("notes", "")),
         )
 
-    # For activation readiness, require non-empty competition_season and sdk_version
+    # For activation readiness, require non-empty competition_season, sdk_version, game_version, supported_languages, minimal_bot_language
     season = spec_data.get("competition_season", "")
     if not isinstance(season, str) or not season.strip():
         all_sections_activation_ready = False
@@ -419,6 +419,22 @@ def validate_game_spec(
         or not ver.strip()
         or ver.strip().lower() in ("unknown", "missing", "unspecified", "unreleased")
     ):
+        all_sections_activation_ready = False
+
+    g_ver = spec_data.get("game_version", "")
+    if (
+        not isinstance(g_ver, str)
+        or not g_ver.strip()
+        or g_ver.strip().lower() in ("unknown", "missing", "unspecified", "unreleased")
+    ):
+        all_sections_activation_ready = False
+
+    langs = spec_data.get("supported_languages", [])
+    if not isinstance(langs, list) or len(langs) == 0:
+        all_sections_activation_ready = False
+
+    bot_lang = spec_data.get("minimal_bot_language", "")
+    if not isinstance(bot_lang, str) or not bot_lang.strip():
         all_sections_activation_ready = False
 
     is_valid = len(errors) == 0
@@ -434,6 +450,12 @@ def validate_game_spec(
             sdk_version=str(spec_data.get("sdk_version", "")),
             generated_at=str(spec_data.get("generated_at", "")),
             updated_at=str(spec_data.get("updated_at", "")),
+            game_version=str(spec_data.get("game_version", "")),
+            supported_languages=[str(x) for x in spec_data.get("supported_languages", [])],
+            launcher_requirements=dict(spec_data.get("launcher_requirements", {})),
+            minimal_bot_language=str(spec_data.get("minimal_bot_language", "")),
+            minimal_bot_layout=dict(spec_data.get("minimal_bot_layout", {})),
+            command_mappings=dict(spec_data.get("command_mappings", {})),
             rules=parsed_rules,
         )
 

@@ -22,8 +22,9 @@ from battlelab.core.models import (
 from battlelab.official.adapter import OfficialAdapter
 from battlelab.official.bridge import OfficialEngineBridge
 from battlelab.official.command_runner import OfficialCommandRunner
-from battlelab.official.models import CommandResult, NormalizedReplay
+from battlelab.official.models import CommandResult, NormalizedReplay, OfficialCommandPlan
 from battlelab.official.readiness import OfficialReadinessChecker
+from battlelab.official.sources import hash_file
 
 SYNTHETIC_SDK_PATH = (
     Path(__file__).resolve().parent.parent / "fixtures" / "synthetic_sdk" / "synthetic_engine.py"
@@ -50,6 +51,48 @@ class FakeOfficialBridge(OfficialEngineBridge):
 
     def get_launcher_argv(self) -> list[str]:
         return [sys.executable]
+
+    def build_probe_command(self) -> OfficialCommandPlan:
+        return OfficialCommandPlan(
+            operation="PROBE",
+            launcher_argv=[sys.executable],
+            sdk_executable_path=str(self.sdk_path.resolve()),
+            operation_argv=["probe"],
+            cwd=str(self.sdk_path.parent.resolve()),
+            sdk_executable_sha256=hash_file(self.sdk_path),
+            launcher_executable_sha256=hash_file(Path(sys.executable)),
+        )
+
+    def parse_probe_result(self, result: CommandResult) -> dict[str, Any]:
+        return json.loads(result.stdout)
+
+    def build_map_discovery_command(self) -> OfficialCommandPlan:
+        return OfficialCommandPlan(
+            operation="DISCOVER_MAPS",
+            launcher_argv=[sys.executable],
+            sdk_executable_path=str(self.sdk_path.resolve()),
+            operation_argv=["maps"],
+            cwd=str(self.sdk_path.parent.resolve()),
+            sdk_executable_sha256=hash_file(self.sdk_path),
+            launcher_executable_sha256=hash_file(Path(sys.executable)),
+        )
+
+    def parse_map_discovery_result(self, result: CommandResult) -> list[str]:
+        return json.loads(result.stdout)
+
+    def build_artifact_command(self, source_path: Path, output_dir: Path) -> OfficialCommandPlan:
+        return OfficialCommandPlan(
+            operation="BUILD",
+            launcher_argv=[sys.executable],
+            sdk_executable_path=str(self.sdk_path.resolve()),
+            operation_argv=["build", str(source_path), str(output_dir)],
+            cwd=str(output_dir.resolve()),
+            sdk_executable_sha256=hash_file(self.sdk_path),
+            launcher_executable_sha256=hash_file(Path(sys.executable)),
+        )
+
+    def parse_build_result(self, result: CommandResult, output_dir: Path) -> dict[str, Any]:
+        return json.loads(result.stdout)
 
     def validate_spec(self, spec_data: dict[str, Any]) -> tuple[bool, str]:
         return True, "Synthetic spec valid"

@@ -218,6 +218,12 @@ class GameSpec:
     sdk_version: str
     generated_at: str
     updated_at: str
+    game_version: str = ""
+    supported_languages: list[str] = field(default_factory=list)
+    launcher_requirements: dict[str, Any] = field(default_factory=dict)
+    minimal_bot_language: str = ""
+    minimal_bot_layout: dict[str, Any] = field(default_factory=dict)
+    command_mappings: dict[str, Any] = field(default_factory=dict)
     rules: dict[str, RuleItem] = field(default_factory=dict)
 
     def canonical_hash(self) -> str:
@@ -230,6 +236,12 @@ class GameSpec:
             "source_bundle_hash": self.source_bundle_hash,
             "official_document_hashes": sorted(self.official_document_hashes),
             "sdk_version": self.sdk_version,
+            "game_version": self.game_version,
+            "supported_languages": sorted(self.supported_languages),
+            "launcher_requirements": self.launcher_requirements,
+            "minimal_bot_language": self.minimal_bot_language,
+            "minimal_bot_layout": self.minimal_bot_layout,
+            "command_mappings": self.command_mappings,
             "rules": {k: self.rules[k].to_dict() for k in sorted(self.rules.keys())},
         }
         return hash_dict(canonical_data)
@@ -245,6 +257,12 @@ class GameSpec:
             "sdk_version": self.sdk_version,
             "generated_at": self.generated_at,
             "updated_at": self.updated_at,
+            "game_version": self.game_version,
+            "supported_languages": list(self.supported_languages),
+            "launcher_requirements": dict(self.launcher_requirements),
+            "minimal_bot_language": self.minimal_bot_language,
+            "minimal_bot_layout": dict(self.minimal_bot_layout),
+            "command_mappings": dict(self.command_mappings),
             "rules": {k: v.to_dict() for k, v in self.rules.items()},
         }
 
@@ -262,6 +280,12 @@ class GameSpec:
             sdk_version=str(data.get("sdk_version", "")),
             generated_at=str(data.get("generated_at", "")),
             updated_at=str(data.get("updated_at", "")),
+            game_version=str(data.get("game_version", "")),
+            supported_languages=[str(x) for x in data.get("supported_languages", [])],
+            launcher_requirements=dict(data.get("launcher_requirements", {})),
+            minimal_bot_language=str(data.get("minimal_bot_language", "")),
+            minimal_bot_layout=dict(data.get("minimal_bot_layout", {})),
+            command_mappings=dict(data.get("command_mappings", {})),
             rules=rules,
         )
 
@@ -476,16 +500,101 @@ class OfficialSDKEvidence:
         )
 
 
+class PlanOperation(str, Enum):
+    PROBE = "PROBE"
+    DISCOVER_MAPS = "DISCOVER_MAPS"
+    BUILD = "BUILD"
+    RUN_MATCH = "RUN_MATCH"
+
+
+class EnforcementStatus(str, Enum):
+    PLATFORM_ENFORCED = "PLATFORM_ENFORCED"
+    OFFICIAL_ENGINE_ENFORCED = "OFFICIAL_ENGINE_ENFORCED"
+    UNENFORCED = "UNENFORCED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class OfficialCommandPlan:
+    """Typed immutable command plan rendered by an engine bridge."""
+
+    operation: PlanOperation | str
+    launcher_argv: list[str]
+    sdk_executable_path: str
+    operation_argv: list[str]
+    cwd: str
+    allowed_env: list[str] = field(default_factory=list)
+    expected_output_contract: str = "text"
+    sdk_executable_sha256: str = ""
+    launcher_executable_sha256: str | None = None
+
+    def get_argv(self) -> list[str]:
+        return (
+            list(self.launcher_argv) + [str(self.sdk_executable_path)] + list(self.operation_argv)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation": str(self.operation),
+            "launcher_argv": list(self.launcher_argv),
+            "sdk_executable_path": self.sdk_executable_path,
+            "operation_argv": list(self.operation_argv),
+            "cwd": self.cwd,
+            "allowed_env": list(self.allowed_env),
+            "expected_output_contract": self.expected_output_contract,
+            "sdk_executable_sha256": self.sdk_executable_sha256,
+            "launcher_executable_sha256": self.launcher_executable_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OfficialCommandPlan:
+        return cls(
+            operation=str(data.get("operation", "")),
+            launcher_argv=[str(x) for x in data.get("launcher_argv", [])],
+            sdk_executable_path=str(data.get("sdk_executable_path", "")),
+            operation_argv=[str(x) for x in data.get("operation_argv", [])],
+            cwd=str(data.get("cwd", ".")),
+            allowed_env=[str(x) for x in data.get("allowed_env", [])],
+            expected_output_contract=str(data.get("expected_output_contract", "text")),
+            sdk_executable_sha256=str(data.get("sdk_executable_sha256", "")),
+            launcher_executable_sha256=(
+                str(data["launcher_executable_sha256"])
+                if data.get("launcher_executable_sha256") is not None
+                else None
+            ),
+        )
+
+
 @dataclass
 class RuleTestEvidence:
-    """Verifiable pytest coverage evidence bound to spec, bundle, executable, and commit."""
+    """Verifiable pytest execution evidence bound to spec, bundle, executable, and commit."""
 
     schema_version: str = "1.0.0"
     spec_hash: str = ""
     source_bundle_hash: str = ""
     sdk_executable_sha256: str = ""
+    launcher_executable_sha256: str | None = None
     git_commit: str = ""
+    dirty_worktree: bool = False
     test_node_ids: list[str] = field(default_factory=list)
+    test_file_hashes: dict[str, str] = field(default_factory=dict)
+    collection_command_hash: str = ""
+    execution_command_hash: str = ""
+    collection_exit_code: int = 0
+    execution_exit_code: int = 0
+    collection_stdout_hash: str = ""
+    collection_stderr_hash: str = ""
+    execution_stdout_hash: str = ""
+    execution_stderr_hash: str = ""
+    junit_xml_hash: str | None = None
+    requested_count: int = 0
+    collected_count: int = 0
+    passed_count: int = 0
+    failed_count: int = 0
+    errored_count: int = 0
+    skipped_count: int = 0
+    xfailed_count: int = 0
+    deselected_count: int = 0
     verified_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -498,8 +607,34 @@ class RuleTestEvidence:
             spec_hash=str(data.get("spec_hash", "")),
             source_bundle_hash=str(data.get("source_bundle_hash", "")),
             sdk_executable_sha256=str(data.get("sdk_executable_sha256", "")),
+            launcher_executable_sha256=(
+                str(data["launcher_executable_sha256"])
+                if data.get("launcher_executable_sha256") is not None
+                else None
+            ),
             git_commit=str(data.get("git_commit", "")),
+            dirty_worktree=bool(data.get("dirty_worktree", False)),
             test_node_ids=[str(x) for x in data.get("test_node_ids", [])],
+            test_file_hashes={str(k): str(v) for k, v in data.get("test_file_hashes", {}).items()},
+            collection_command_hash=str(data.get("collection_command_hash", "")),
+            execution_command_hash=str(data.get("execution_command_hash", "")),
+            collection_exit_code=int(data.get("collection_exit_code", 0)),
+            execution_exit_code=int(data.get("execution_exit_code", 0)),
+            collection_stdout_hash=str(data.get("collection_stdout_hash", "")),
+            collection_stderr_hash=str(data.get("collection_stderr_hash", "")),
+            execution_stdout_hash=str(data.get("execution_stdout_hash", "")),
+            execution_stderr_hash=str(data.get("execution_stderr_hash", "")),
+            junit_xml_hash=(
+                str(data["junit_xml_hash"]) if data.get("junit_xml_hash") is not None else None
+            ),
+            requested_count=int(data.get("requested_count", 0)),
+            collected_count=int(data.get("collected_count", 0)),
+            passed_count=int(data.get("passed_count", 0)),
+            failed_count=int(data.get("failed_count", 0)),
+            errored_count=int(data.get("errored_count", 0)),
+            skipped_count=int(data.get("skipped_count", 0)),
+            xfailed_count=int(data.get("xfailed_count", 0)),
+            deselected_count=int(data.get("deselected_count", 0)),
             verified_at=str(data.get("verified_at", "")),
         )
 
@@ -518,6 +653,7 @@ class ReadinessReport:
     blockers: list[str] = field(default_factory=list)
     sdk_evidence: OfficialSDKEvidence | None = None
     test_evidence: RuleTestEvidence | None = None
+    memory_enforcement_status: EnforcementStatus = EnforcementStatus.UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -529,6 +665,7 @@ class ReadinessReport:
             "sdk_version": self.sdk_version,
             "blockers": list(self.blockers),
             "checks": [c.to_dict() for c in self.checks],
+            "memory_enforcement_status": self.memory_enforcement_status.value,
         }
         if self.sdk_evidence is not None:
             d["sdk_evidence"] = self.sdk_evidence.to_dict()

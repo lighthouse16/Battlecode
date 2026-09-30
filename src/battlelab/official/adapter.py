@@ -19,7 +19,8 @@ from battlelab.core.models import (
     MatchSpec,
 )
 from battlelab.official.bridge import OfficialEngineBridge, UnconfiguredOfficialBridge
-from battlelab.official.command_runner import OfficialCommandRunner
+from battlelab.official.command_runner import InfrastructureTamperingError, OfficialCommandRunner
+from battlelab.official.models import OfficialCommandPlan
 
 
 class OfficialAdapter(GameAdapter):
@@ -113,18 +114,30 @@ class OfficialAdapter(GameAdapter):
 
             # Derive can_run_local from honest readiness report, never self-reported probe booleans
             from battlelab.official.readiness import OfficialReadinessChecker
+            from battlelab.official.spec import load_and_validate_spec
 
-            checker = OfficialReadinessChecker(bridge=self.bridge)
+            checker = OfficialReadinessChecker(bridge=self.bridge, runner=self.command_runner)
             report = checker.evaluate()
+
+            game_ver = "UNKNOWN"
+            supported_langs: list[str] = []
+            if checker.spec_path.is_file():
+                is_valid, _, spec_obj, _ = load_and_validate_spec(checker.spec_path)
+                if is_valid and spec_obj:
+                    if spec_obj.game_version:
+                        game_ver = spec_obj.game_version
+                    if report.can_run_local and spec_obj.supported_languages:
+                        supported_langs = list(spec_obj.supported_languages)
+
             return Capability(
                 can_run_local=report.can_run_local,
                 can_run_remote=False,
                 can_submit=False,  # Unconditionally false
                 can_fetch_replays=False,
                 can_list_matches=False,
-                supported_languages=["python"] if report.can_run_local else [],
+                supported_languages=supported_langs,
                 adapter_version=self.version,
-                game_version=report.sdk_version or "UNKNOWN",
+                game_version=game_ver,
             )
         except Exception:
             return Capability(
@@ -188,15 +201,17 @@ class OfficialAdapter(GameAdapter):
         # 3. Build match command
         cmd = self.bridge.build_match_command(spec, bot_a, bot_b, work_dir)
 
-        # 4. Verify match command uses the declared SDK executable identity
-        declared_exe = self.bridge.get_sdk_executable()
-        if declared_exe is not None:
-            dec_p = Path(declared_exe).resolve()
-            cmd_resolved = [
-                str(Path(c).resolve()) if (isinstance(c, str) and Path(c).exists()) else str(c)
-                for c in cmd
-            ]
-            if str(dec_p) not in cmd_resolved:
+        timeout_sec = max(0.1, float(spec.match_wall_clock_limit_ms) / 1000.0)
+
+        if isinstance(cmd, OfficialCommandPlan):
+            try:
+                cmd_result = self.command_runner.execute_plan(
+                    plan=cmd,
+                    timeout_seconds=timeout_sec,
+                    cancel_event=cancel_event,
+                    memory_limit_mb=spec.memory_limit_mb,
+                )
+            except InfrastructureTamperingError as e:
                 return MatchResult(
                     match_id=spec.match_id,
                     outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
@@ -208,20 +223,46 @@ class OfficialAdapter(GameAdapter):
                     replay_path=None,
                     replay_hash=None,
                     failure_classification=FailureClassification(
-                        category=FailureCategory.ENGINE_CRASH,
-                        culprit="engine",
-                        evidence=f"Match command does not invoke verified SDK executable '{dec_p}': {cmd}",
+                        category=FailureCategory.UNKNOWN_INFRASTRUCTURE,
+                        culprit="system",
+                        evidence=f"Infrastructure tampering detected: {e}",
                     ),
                 )
+        else:
+            # 4. Verify match command uses the declared SDK executable identity
+            declared_exe = self.bridge.get_sdk_executable()
+            if declared_exe is not None:
+                dec_p = Path(declared_exe).resolve()
+                cmd_resolved = [
+                    str(Path(c).resolve()) if (isinstance(c, str) and Path(c).exists()) else str(c)
+                    for c in cmd
+                ]
+                if str(dec_p) not in cmd_resolved:
+                    return MatchResult(
+                        match_id=spec.match_id,
+                        outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                        winner=None,
+                        score_a=0.0,
+                        score_b=0.0,
+                        turns_played=0,
+                        duration_ms=0.0,
+                        replay_path=None,
+                        replay_hash=None,
+                        failure_classification=FailureClassification(
+                            category=FailureCategory.ENGINE_CRASH,
+                            culprit="engine",
+                            evidence=f"Match command does not invoke verified SDK executable '{dec_p}': {cmd}",
+                        ),
+                    )
 
-        # 5. Run external process using match_wall_clock_limit_ms
-        timeout_sec = max(0.1, float(spec.match_wall_clock_limit_ms) / 1000.0)
-        cmd_result = self.command_runner.run(
-            argv=cmd,
-            cwd=work_dir,
-            timeout_seconds=timeout_sec,
-            cancel_event=cancel_event,
-        )
+            # 5. Run external process using match_wall_clock_limit_ms
+            cmd_result = self.command_runner.run(
+                argv=cmd,
+                cwd=work_dir,
+                timeout_seconds=timeout_sec,
+                cancel_event=cancel_event,
+                memory_limit_mb=spec.memory_limit_mb,
+            )
 
         # 6. Handle abnormal process outcomes
         if cmd_result.timed_out:

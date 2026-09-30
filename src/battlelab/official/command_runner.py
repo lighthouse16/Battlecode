@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import stat
 import subprocess
 import threading
 import time
@@ -11,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from battlelab.bots.process_runner import terminate_process_tree
-from battlelab.official.models import CommandResult
+from battlelab.official._win_appexeclink import resolve_executable_for_hash
+from battlelab.official.models import CommandResult, EnforcementStatus, OfficialCommandPlan
+from battlelab.official.sources import hash_file
 
 DEFAULT_ALLOWED_ENV_VARS = frozenset(
     {
@@ -35,11 +38,36 @@ DEFAULT_ALLOWED_ENV_VARS = frozenset(
 )
 
 
+class InfrastructureTamperingError(RuntimeError):
+    """Raised when an executable is mutated or substituted before/during/after execution."""
+
+
 class OfficialCommandRunner:
     """Secure, isolated external command runner for official competition executables."""
 
     def __init__(self, allowed_env_vars: frozenset[str] = DEFAULT_ALLOWED_ENV_VARS) -> None:
         self.allowed_env_vars = allowed_env_vars
+
+    def get_memory_enforcement_status(
+        self,
+        engine_enforced: bool = False,
+        engine_evidence_verified: bool = False,
+    ) -> tuple[EnforcementStatus, str]:
+        """Return truthful memory enforcement status."""
+        if engine_enforced and engine_evidence_verified:
+            return (
+                EnforcementStatus.OFFICIAL_ENGINE_ENFORCED,
+                "Engine-enforced memory limits verified with test evidence",
+            )
+        if platform.system() in ("Linux", "Darwin"):
+            return (
+                EnforcementStatus.PLATFORM_ENFORCED,
+                "resource.setrlimit supported on POSIX child launch",
+            )
+        return (
+            EnforcementStatus.UNENFORCED,
+            "Windows platform lacks stdlib Job Objects memory limit enforcement",
+        )
 
     def _redact(self, text: str, secrets: list[str] | None) -> str:
         """Redact known secret strings from text."""
@@ -89,6 +117,7 @@ class OfficialCommandRunner:
         stderr_limit_bytes: int = 10 * 1024 * 1024,
         secrets: list[str] | None = None,
         dry_run: bool = False,
+        memory_limit_mb: int | None = None,
     ) -> CommandResult:
         """Execute external command with strict security and termination guarantees."""
 
@@ -195,6 +224,18 @@ class OfficialCommandRunner:
         }
         if platform.system() != "Windows":
             popen_kwargs["start_new_session"] = True
+            if memory_limit_mb is not None and memory_limit_mb > 0:
+
+                def _set_mem_limit() -> None:
+                    try:
+                        import resource
+
+                        lim = int(memory_limit_mb) * 1024 * 1024
+                        resource.setrlimit(resource.RLIMIT_AS, (lim, lim))  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+                popen_kwargs["preexec_fn"] = _set_mem_limit
 
         start_time = time.monotonic()
         try:
@@ -267,3 +308,123 @@ class OfficialCommandRunner:
             stdout_truncated=stdout_trunc[0],
             stderr_truncated=stderr_trunc[0],
         )
+
+    def execute_plan(
+        self,
+        plan: OfficialCommandPlan,
+        timeout_seconds: float = 30.0,
+        cancel_event: threading.Event | None = None,
+        secrets: list[str] | None = None,
+        dry_run: bool = False,
+        memory_limit_mb: int | None = None,
+    ) -> CommandResult:
+        """Validate exact command identity and execute an immutable OfficialCommandPlan."""
+        # 1. Inspect SDK executable
+        sdk_path = Path(plan.sdk_executable_path)
+        if not sdk_path.exists():
+            raise FileNotFoundError(f"SDK executable does not exist: {sdk_path}")
+        try:
+            st = os.lstat(sdk_path)
+            if stat.S_ISLNK(st.st_mode):
+                raise ValueError(f"SDK executable cannot be a symlink: {sdk_path}")
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"SDK executable must be a regular file: {sdk_path}")
+        except OSError as e:
+            raise ValueError(f"Failed to lstat SDK executable: {e}") from None
+
+        # Verify no ancestor symlinks
+        cur = sdk_path.resolve().parent
+        while cur != cur.parent:
+            try:
+                if stat.S_ISLNK(os.lstat(cur).st_mode):
+                    raise ValueError(f"SDK executable ancestor cannot be a symlink: {cur}")
+            except OSError:
+                pass
+            cur = cur.parent
+
+        # 2. Inspect launcher (if any)
+        launcher_bin: Path | None = None
+        if plan.launcher_argv:
+            launcher_bin = Path(plan.launcher_argv[0])
+            if not launcher_bin.exists():
+                raise FileNotFoundError(f"Launcher binary does not exist: {launcher_bin}")
+            try:
+                l_st = os.lstat(launcher_bin)
+                if stat.S_ISLNK(l_st.st_mode):
+                    raise ValueError(f"Launcher binary cannot be a symlink: {launcher_bin}")
+                if not stat.S_ISREG(l_st.st_mode):
+                    raise ValueError(f"Launcher binary must be a regular file: {launcher_bin}")
+            except OSError as e:
+                raise ValueError(f"Failed to lstat launcher binary: {e}") from None
+
+        # 3. Exact command identity prefix check
+        full_argv = plan.get_argv()
+        if plan.launcher_argv:
+            expected_prefix = list(plan.launcher_argv) + [str(plan.sdk_executable_path)]
+            prefix_len = len(expected_prefix)
+            if full_argv[:prefix_len] != expected_prefix:
+                raise ValueError(
+                    f"Exact launcher + SDK prefix required: argv must start with {expected_prefix}, got {full_argv[:prefix_len]}"
+                )
+            # Ensure SDK executable path is not used elsewhere as an inert argument
+            sdk_str = str(plan.sdk_executable_path)
+            sdk_canon = str(sdk_path.resolve())
+            for extra_arg in full_argv[prefix_len:]:
+                if extra_arg == sdk_str or extra_arg == sdk_canon:
+                    raise ValueError(
+                        f"SDK path appearing elsewhere in argv is rejected: {extra_arg}"
+                    )
+        else:
+            if not full_argv or full_argv[0] != str(plan.sdk_executable_path):
+                raise ValueError(
+                    f"Exact SDK prefix required: argv[0] must be {plan.sdk_executable_path}"
+                )
+
+        # 4. Hash verification against plan (resolve Windows Store alias stubs)
+        sdk_hash_path = resolve_executable_for_hash(sdk_path)
+        launcher_hash_path = (
+            resolve_executable_for_hash(launcher_bin) if launcher_bin is not None else None
+        )
+
+        current_sdk_hash = hash_file(sdk_hash_path)
+        if plan.sdk_executable_sha256 and current_sdk_hash != plan.sdk_executable_sha256:
+            raise ValueError(
+                f"SDK executable hash mismatch: plan expected {plan.sdk_executable_sha256}, disk has {current_sdk_hash}"
+            )
+
+        if launcher_hash_path is not None and plan.launcher_executable_sha256:
+            current_launcher_hash = hash_file(launcher_hash_path)
+            if current_launcher_hash != plan.launcher_executable_sha256:
+                raise ValueError(
+                    f"Launcher executable hash mismatch: plan expected {plan.launcher_executable_sha256}, disk has {current_launcher_hash}"
+                )
+
+        # 5. Pre-execution hash snapshot
+        pre_sdk_hash = hash_file(sdk_hash_path)
+        pre_launcher_hash = (
+            hash_file(launcher_hash_path) if launcher_hash_path is not None else None
+        )
+
+        # 6. Execute command
+        res = self.run(
+            argv=full_argv,
+            cwd=Path(plan.cwd),
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+            secrets=secrets,
+            dry_run=dry_run,
+            memory_limit_mb=memory_limit_mb,
+        )
+
+        # 7. Post-execution hash snapshot & mutation detection
+        post_sdk_hash = hash_file(sdk_hash_path)
+        post_launcher_hash = (
+            hash_file(launcher_hash_path) if launcher_hash_path is not None else None
+        )
+
+        if pre_sdk_hash != post_sdk_hash or pre_launcher_hash != post_launcher_hash:
+            raise InfrastructureTamperingError(
+                "Infrastructure tampering detected: executable mutated during command execution"
+            )
+
+        return res

@@ -13,7 +13,7 @@ from battlelab.core.models import (
     MatchResult,
     MatchSpec,
 )
-from battlelab.official.models import CommandResult, NormalizedReplay
+from battlelab.official.models import CommandResult, NormalizedReplay, OfficialCommandPlan
 
 
 class OfficialEngineBridge(ABC):
@@ -32,25 +32,66 @@ class OfficialEngineBridge(ABC):
         """Return launcher argv prefix if invoked through an interpreter (e.g. [sys.executable])."""
         return []
 
-    @abstractmethod
+    def build_probe_command(self) -> OfficialCommandPlan:
+        """Build command plan for probing official SDK version and features."""
+        raise CapabilityNotSupportedError(
+            "build_probe_command", "official", "Official SDK probe command unconfigured."
+        )
+
+    def parse_probe_result(self, result: CommandResult) -> dict[str, Any]:
+        """Parse command execution output from probe into structured metadata dictionary."""
+        raise CapabilityNotSupportedError(
+            "parse_probe_result", "official", "Official SDK probe output parser unconfigured."
+        )
+
+    def build_map_discovery_command(self) -> OfficialCommandPlan:
+        """Build command plan for discovering competition maps from SDK executable."""
+        raise CapabilityNotSupportedError(
+            "build_map_discovery_command",
+            "official",
+            "Official map discovery command unconfigured.",
+        )
+
+    def parse_map_discovery_result(self, result: CommandResult) -> list[str]:
+        """Parse maps output from command execution into list of map names."""
+        raise CapabilityNotSupportedError(
+            "parse_map_discovery_result",
+            "official",
+            "Official map discovery output parser unconfigured.",
+        )
+
+    def build_artifact_command(self, source_path: Path, output_dir: Path) -> OfficialCommandPlan:
+        """Build command plan for packaging/compiling a bot into an official runnable package."""
+        raise CapabilityNotSupportedError(
+            "build_artifact_command", "official", "Official artifact build command unconfigured."
+        )
+
+    def parse_build_result(self, result: CommandResult, output_dir: Path) -> dict[str, Any]:
+        """Parse build command result and verify output package."""
+        raise CapabilityNotSupportedError(
+            "parse_build_result", "official", "Official build result parser unconfigured."
+        )
+
     def probe_sdk(self) -> dict[str, Any]:
         """Probe the official SDK installation, version, and supported features."""
-        ...
+        raise CapabilityNotSupportedError(
+            "probe_sdk", "official", "Official SDK not released or configured."
+        )
 
-    @abstractmethod
     def discover_maps(self) -> list[str]:
         """Discover official competition maps."""
-        ...
+        return []
 
     @abstractmethod
     def validate_bot_compatibility(self, bot_artifact: BotArtifact) -> tuple[bool, str]:
         """Check whether a bot artifact adheres to official packaging and language requirements."""
         ...
 
-    @abstractmethod
     def build_or_prepare_artifact(self, source_path: Path, output_dir: Path) -> dict[str, Any]:
         """Build or prepare a bot artifact into runnable official bot package."""
-        ...
+        raise CapabilityNotSupportedError(
+            "build_or_prepare_artifact", "official", "Official build toolchain unknown."
+        )
 
     @abstractmethod
     def build_match_command(
@@ -59,8 +100,8 @@ class OfficialEngineBridge(ABC):
         bot_a: BotArtifact,
         bot_b: BotArtifact,
         work_dir: Path,
-    ) -> list[str]:
-        """Construct the subprocess argv list for executing an official match."""
+    ) -> OfficialCommandPlan | list[str]:
+        """Construct the command plan or argv list for executing an official match."""
         ...
 
     @abstractmethod

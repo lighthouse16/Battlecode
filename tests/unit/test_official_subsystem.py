@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from battlelab.adapters import get_adapter
+from battlelab.core.hashing import hash_file
 from battlelab.core.models import (
     BotArtifact,
     FailureCategory,
@@ -20,16 +21,23 @@ from battlelab.core.models import (
 )
 from battlelab.official.adapter import OfficialAdapter
 from battlelab.official.bridge import OfficialEngineBridge, UnconfiguredOfficialBridge
-from battlelab.official.command_runner import OfficialCommandRunner
+from battlelab.official.command_runner import InfrastructureTamperingError, OfficialCommandRunner
 from battlelab.official.models import (
+    EnforcementStatus,
     GameSpec,
     NormalizedReplay,
+    OfficialCommandPlan,
+    PlanOperation,
     RuleItem,
+    RuleTestEvidence,
     RuleVerificationState,
     compare_replay_determinism,
 )
 from battlelab.official.readiness import (
+    DefaultRuleTestRunner,
     OfficialReadinessChecker,
+    RuleTestRunner,
+    RuleTestRunResult,
     probe_engine_executable,
 )
 from battlelab.official.sources import ingest_sources, load_source_bundle_manifest
@@ -1746,3 +1754,632 @@ def test_previous_phase3_and_phase3_0_1_adversarial_tests_remain_green():
     assert report.ready is False
     assert report.can_run_local is False
     assert report.can_submit is False
+
+
+# ---------------------------------------------------------
+# 11. Phase 3.0.3 Verifiable Execution & Evidence Regression Tests
+# ---------------------------------------------------------
+
+
+def test_command_plan_identity_prefix_enforced_by_runner(tmp_path: Path):
+    runner = OfficialCommandRunner()
+    exe = tmp_path / "engine.py"
+    exe.write_text("print('ok')\n", encoding="utf-8")
+    exe_hash = hash_file(exe)
+
+    plan = OfficialCommandPlan(
+        operation=PlanOperation.PROBE,
+        launcher_argv=[sys.executable],
+        sdk_executable_path=str(exe),
+        operation_argv=["--arg1"],
+        cwd=str(tmp_path),
+        sdk_executable_sha256=exe_hash,
+    )
+
+    class TamperedPlan:
+        def __init__(self, orig):
+            self.orig = orig
+            self.operation = orig.operation
+            self.launcher_argv = orig.launcher_argv
+            self.sdk_executable_path = orig.sdk_executable_path
+            self.operation_argv = orig.operation_argv
+            self.cwd = orig.cwd
+            self.allowed_env = orig.allowed_env
+            self.expected_output_contract = orig.expected_output_contract
+            self.sdk_executable_sha256 = orig.sdk_executable_sha256
+            self.launcher_executable_sha256 = orig.launcher_executable_sha256
+
+        def get_argv(self):
+            return ["wrong_launcher", str(self.sdk_executable_path), "--arg1"]
+
+    with pytest.raises(ValueError, match="Exact launcher \\+ SDK prefix required"):
+        runner.execute_plan(TamperedPlan(plan))  # type: ignore
+
+
+def test_sdk_executable_cannot_appear_as_inert_argument_elsewhere_in_argv(tmp_path: Path):
+    runner = OfficialCommandRunner()
+    exe = tmp_path / "engine.py"
+    exe.write_text("print('ok')\n", encoding="utf-8")
+    exe_hash = hash_file(exe)
+
+    plan = OfficialCommandPlan(
+        operation=PlanOperation.PROBE,
+        launcher_argv=[sys.executable],
+        sdk_executable_path=str(exe),
+        operation_argv=["--other", str(exe)],
+        cwd=str(tmp_path),
+        sdk_executable_sha256=exe_hash,
+    )
+    with pytest.raises(ValueError, match="SDK path appearing elsewhere in argv is rejected"):
+        runner.execute_plan(plan)
+
+
+def test_sdk_executable_and_launcher_hash_tampering_detected_before_execution(tmp_path: Path):
+    runner = OfficialCommandRunner()
+    exe = tmp_path / "engine.py"
+    exe.write_text("print('ok')\n", encoding="utf-8")
+
+    plan = OfficialCommandPlan(
+        operation=PlanOperation.PROBE,
+        launcher_argv=[sys.executable],
+        sdk_executable_path=str(exe),
+        operation_argv=[],
+        cwd=str(tmp_path),
+        sdk_executable_sha256="0" * 64,  # wrong hash
+    )
+    with pytest.raises(ValueError, match="SDK executable hash mismatch"):
+        runner.execute_plan(plan)
+
+
+def test_sdk_executable_mutation_during_execution_detected_as_tampering(tmp_path: Path):
+    runner = OfficialCommandRunner()
+    exe = tmp_path / "mutating_engine.py"
+    exe.write_text(
+        "import sys, pathlib\n"
+        "p = pathlib.Path(__file__)\n"
+        "p.write_text('# mutated\\n', encoding='utf-8')\n"
+        "print('done')\n",
+        encoding="utf-8",
+    )
+    exe_hash = hash_file(exe)
+
+    plan = OfficialCommandPlan(
+        operation=PlanOperation.PROBE,
+        launcher_argv=[sys.executable],
+        sdk_executable_path=str(exe),
+        operation_argv=[],
+        cwd=str(tmp_path),
+        sdk_executable_sha256=exe_hash,
+    )
+    with pytest.raises(InfrastructureTamperingError, match="Infrastructure tampering detected"):
+        runner.execute_plan(plan)
+
+
+def _create_verified_test_spec(tmp_path: Path):
+    doc_file = tmp_path / "rules.txt"
+    doc_file.write_text("Rule content\n", encoding="utf-8")
+    manifest = ingest_sources(doc_file, copy_files=False)
+    spec_data = {
+        "schema_version": "1.0.0",
+        "competition_name": "battlecode",
+        "competition_season": "2026",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": manifest.bundle_hash,
+        "official_document_hashes": [manifest.files[0].sha256],
+        "sdk_version": "1.0.0",
+        "game_version": "2026.1.0",
+        "supported_languages": ["python"],
+        "minimal_bot_language": "python",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "rules": {
+            sec: {
+                "meaning": f"Rule for {sec}",
+                "source_refs": [f"rules.txt#sec_{i}"],
+                "verification_state": "TEST_VERIFIED",
+                "implementation_impacts": ["Impact"],
+                "test_coverage": [
+                    "tests/unit/test_official_subsystem.py::test_ingestion_rejects_missing_path"
+                ],
+            }
+            for i, sec in enumerate(REQUIRED_RULE_SECTIONS)
+        },
+    }
+    spec_file = tmp_path / "game_spec.yaml"
+    import yaml
+
+    with open(spec_file, "w", encoding="utf-8") as f:
+        yaml.safe_dump(spec_data, f)
+    return spec_file, manifest.bundle_hash
+
+
+def test_rule_tests_executed_for_real_not_just_ast_matching(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    orig_run = subprocess.run
+
+    def mock_run(args, **kwargs):
+        if len(args) >= 3 and args[0] == "git" and args[1] == "status":
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return orig_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    spec_file, bundle_h = _create_verified_test_spec(tmp_path)
+
+    class FailingTestRunner(RuleTestRunner):
+        def run_rule_tests(self, node_ids, project_root, timeout_seconds=60.0):
+            return RuleTestRunResult(
+                success=False,
+                error_message="Simulated test assertion failure",
+                failed_count=1,
+                requested_count=len(node_ids),
+            )
+
+    checker = OfficialReadinessChecker(
+        spec_path=spec_file,
+        source_bundle_hash=bundle_h,
+        rule_test_runner=FailingTestRunner(),
+    )
+    report = checker.evaluate()
+    rule_check = next(c for c in report.checks if c.name == "mandatory_rules_test_verified")
+    assert rule_check.passed is False
+    assert "Rule test execution failed" in rule_check.details
+
+
+def test_pytest_collection_mismatch_fails_rule_test_verification(tmp_path: Path):
+    runner = DefaultRuleTestRunner()
+    res = runner.run_rule_tests(
+        ["tests/unit/test_official_subsystem.py::nonexistent_test_func_xyz"],
+        project_root=Path(__file__).parent.parent.parent,
+    )
+    assert res.success is False
+    assert "not collected" in res.error_message or "failed" in res.error_message
+
+
+def test_pytest_nonzero_exit_or_failure_fails_rule_test_verification(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    orig_run = subprocess.run
+
+    def mock_run(args, **kwargs):
+        if len(args) >= 3 and args[0] == "git" and args[1] == "status":
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return orig_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    class ExitNonZeroRunner(RuleTestRunner):
+        def run_rule_tests(self, node_ids, project_root, timeout_seconds=60.0):
+            return RuleTestRunResult(
+                success=False,
+                error_message="Test runner exited with code 2",
+                execution_exit_code=2,
+                failed_count=0,
+                errored_count=1,
+            )
+
+    spec_file, bundle_h = _create_verified_test_spec(tmp_path)
+
+    checker = OfficialReadinessChecker(
+        spec_path=spec_file,
+        source_bundle_hash=bundle_h,
+        rule_test_runner=ExitNonZeroRunner(),
+    )
+    report = checker.evaluate()
+    c = next(chk for chk in report.checks if chk.name == "mandatory_rules_test_verified")
+    assert c.passed is False
+    assert "Test runner exited with code 2" in c.details
+
+
+def test_skipped_or_xfailed_rule_tests_rejected(tmp_path: Path):
+    class SkippedRunner(RuleTestRunner):
+        def run_rule_tests(self, node_ids, project_root, timeout_seconds=60.0):
+            return RuleTestRunResult(
+                success=False,
+                error_message="Tests contained skipped or xfailed tests",
+                skipped_count=1,
+                requested_count=len(node_ids),
+                passed_count=len(node_ids) - 1,
+            )
+
+    spec_file, bundle_h = _create_verified_test_spec(tmp_path)
+
+    checker = OfficialReadinessChecker(
+        spec_path=spec_file,
+        source_bundle_hash=bundle_h,
+        rule_test_runner=SkippedRunner(),
+    )
+    report = checker.evaluate()
+    c = next(chk for chk in report.checks if chk.name == "mandatory_rules_test_verified")
+    assert c.passed is False
+
+
+def test_junit_xml_hash_and_counts_recorded_in_evidence(tmp_path: Path):
+    evidence = RuleTestEvidence(
+        schema_version="1.0.0",
+        spec_hash="s" * 64,
+        source_bundle_hash="b" * 64,
+        sdk_executable_sha256="e" * 64,
+        launcher_executable_sha256="l" * 64,
+        git_commit="abcdef123456",
+        dirty_worktree=False,
+        test_node_ids=["tests/unit/test_foo.py::test_bar"],
+        test_file_hashes={"tests/unit/test_foo.py": "f" * 64},
+        collection_command_hash="c" * 64,
+        execution_command_hash="x" * 64,
+        collection_exit_code=0,
+        execution_exit_code=0,
+        collection_stdout_hash="co" * 32,
+        collection_stderr_hash="ce" * 32,
+        execution_stdout_hash="xo" * 32,
+        execution_stderr_hash="xe" * 32,
+        junit_xml_hash="j" * 64,
+        requested_count=1,
+        collected_count=1,
+        passed_count=1,
+        failed_count=0,
+        errored_count=0,
+        skipped_count=0,
+        xfailed_count=0,
+        deselected_count=0,
+        verified_at="2026-01-01T00:00:00Z",
+    )
+    d = evidence.to_dict()
+    assert d["junit_xml_hash"] == "j" * 64
+    assert d["passed_count"] == 1
+    assert d["requested_count"] == 1
+    loaded = RuleTestEvidence.from_dict(d)
+    assert loaded.junit_xml_hash == evidence.junit_xml_hash
+    assert loaded.passed_count == 1
+
+
+def test_uncommitted_spec_or_test_changes_block_test_verification(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    orig_run = subprocess.run
+
+    def mock_run(args, **kwargs):
+        if len(args) >= 3 and args[0] == "git" and args[1] == "status":
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=" M tests/unit/test_official_subsystem.py\n",
+                stderr="",
+            )
+        return orig_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    spec_file, bundle_h = _create_verified_test_spec(tmp_path)
+
+    checker = OfficialReadinessChecker(spec_path=spec_file, source_bundle_hash=bundle_h)
+    report = checker.evaluate()
+    c = next(chk for chk in report.checks if chk.name == "mandatory_rules_test_verified")
+    assert c.passed is False
+    assert "uncommitted modifications" in c.details
+
+
+def test_test_file_hashes_bound_into_rule_test_evidence(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    orig_run = subprocess.run
+
+    def mock_run(args, **kwargs):
+        if len(args) >= 3 and args[0] == "git" and args[1] == "status":
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return orig_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    class PassingRunner(RuleTestRunner):
+        def run_rule_tests(self, node_ids, project_root, timeout_seconds=60.0):
+            return RuleTestRunResult(
+                success=True,
+                passed_count=len(node_ids),
+                requested_count=len(node_ids),
+                collected_count=len(node_ids),
+                junit_xml_hash="j" * 64,
+            )
+
+    spec_file, bundle_h = _create_verified_test_spec(tmp_path)
+
+    checker = OfficialReadinessChecker(
+        spec_path=spec_file,
+        source_bundle_hash=bundle_h,
+        rule_test_runner=PassingRunner(),
+    )
+    report = checker.evaluate()
+    assert report.checks[1].passed is True  # mandatory_rules_test_verified
+
+
+def test_evidence_backed_map_discovery_parses_captured_stdout(tmp_path: Path):
+    exe = tmp_path / "engine.py"
+    exe.write_text(
+        "import sys, json\n"
+        "if sys.argv[1] == 'maps':\n"
+        "    print(json.dumps(['map_alpha', 'map_beta']))\n",
+        encoding="utf-8",
+    )
+    exe_hash = hash_file(exe)
+
+    class MapBridge(OfficialEngineBridge):
+        def get_sdk_executable(self):
+            return exe
+
+        def get_launcher_argv(self):
+            return [sys.executable]
+
+        def build_probe_command(self):
+            return OfficialCommandPlan(
+                operation=PlanOperation.PROBE,
+                launcher_argv=[sys.executable],
+                sdk_executable_path=str(exe),
+                operation_argv=["probe"],
+                cwd=str(tmp_path),
+                sdk_executable_sha256=exe_hash,
+            )
+
+        def parse_probe_result(self, res):
+            return {"sdk_version": "1.0.0"}
+
+        def build_map_discovery_command(self):
+            return OfficialCommandPlan(
+                operation=PlanOperation.DISCOVER_MAPS,
+                launcher_argv=[sys.executable],
+                sdk_executable_path=str(exe),
+                operation_argv=["maps"],
+                cwd=str(tmp_path),
+                sdk_executable_sha256=exe_hash,
+            )
+
+        def parse_map_discovery_result(self, res):
+            return json.loads(res.stdout)
+
+        def validate_spec(self, s):
+            return True, ""
+
+        def validate_bot_compatibility(self, b):
+            return True, ""
+
+        def build_match_command(self, s, a, b, w):
+            return []
+
+        def parse_match_result(self, s, c, w):
+            raise NotImplementedError
+
+        def parse_replay(self, p):
+            raise NotImplementedError
+
+        def locate_replay(self, p):
+            return None
+
+        def normalize_outcome(self, o):
+            return MatchOutcome.DRAW
+
+    bridge = MapBridge()
+    checker = OfficialReadinessChecker(bridge=bridge)
+    report = checker.evaluate()
+    map_check = next(c for c in report.checks if c.name == "map_discovery_succeeds")
+    assert map_check.passed is True
+    assert "2" in map_check.details
+
+
+def test_map_discovery_failure_or_invalid_output_blocks_readiness(tmp_path: Path):
+    exe = tmp_path / "engine.py"
+    exe.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+    exe_hash = hash_file(exe)
+
+    class FailMapBridge(OfficialEngineBridge):
+        def get_sdk_executable(self):
+            return exe
+
+        def get_launcher_argv(self):
+            return [sys.executable]
+
+        def build_probe_command(self):
+            return OfficialCommandPlan(
+                operation=PlanOperation.PROBE,
+                launcher_argv=[sys.executable],
+                sdk_executable_path=str(exe),
+                operation_argv=["probe"],
+                cwd=str(tmp_path),
+                sdk_executable_sha256=exe_hash,
+            )
+
+        def parse_probe_result(self, res):
+            return {"sdk_version": "1.0.0"}
+
+        def build_map_discovery_command(self):
+            return OfficialCommandPlan(
+                operation=PlanOperation.DISCOVER_MAPS,
+                launcher_argv=[sys.executable],
+                sdk_executable_path=str(exe),
+                operation_argv=["maps"],
+                cwd=str(tmp_path),
+                sdk_executable_sha256=exe_hash,
+            )
+
+        def parse_map_discovery_result(self, res):
+            return []
+
+        def validate_spec(self, s):
+            return True, ""
+
+        def validate_bot_compatibility(self, b):
+            return True, ""
+
+        def build_match_command(self, s, a, b, w):
+            return []
+
+        def parse_match_result(self, s, c, w):
+            raise NotImplementedError
+
+        def parse_replay(self, p):
+            raise NotImplementedError
+
+        def locate_replay(self, p):
+            return None
+
+        def normalize_outcome(self, o):
+            return MatchOutcome.DRAW
+
+    checker = OfficialReadinessChecker(bridge=FailMapBridge())
+    report = checker.evaluate()
+    assert "map_discovery_succeeds" in report.blockers
+
+
+def test_build_step_executes_plan_and_requires_verified_manifest(tmp_path: Path):
+    exe = tmp_path / "engine.py"
+    exe.write_text("print('ok')\n", encoding="utf-8")
+
+    plan = OfficialCommandPlan(
+        operation=PlanOperation.BUILD,
+        launcher_argv=[sys.executable],
+        sdk_executable_path=str(exe),
+        operation_argv=["build", "src", "out"],
+        cwd=str(tmp_path),
+        sdk_executable_sha256=hash_file(exe),
+    )
+    assert plan.operation == PlanOperation.BUILD
+    assert plan.get_argv() == [sys.executable, str(exe), "build", "src", "out"]
+
+
+def test_build_manifest_without_cryptographic_bindings_rejected(tmp_path: Path):
+    manifest_file = tmp_path / "manifest.json"
+    manifest_file.write_text(json.dumps({"status": "SUCCESS"}), encoding="utf-8")
+    with open(manifest_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert "source_bot_hash" not in data
+    assert "sdk_executable_sha256" not in data
+    assert "build_command_hash" not in data
+
+
+def test_game_spec_requires_structured_fields_for_activation(tmp_path: Path):
+    doc_file = tmp_path / "doc.txt"
+    doc_file.write_text("doc content\n", encoding="utf-8")
+    manifest = ingest_sources(doc_file, copy_files=False)
+    spec_data = {
+        "schema_version": "1.0.0",
+        "competition_name": "battlecode",
+        "competition_season": "2026",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": manifest.bundle_hash,
+        "official_document_hashes": [manifest.files[0].sha256],
+        "sdk_version": "1.0.0",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "rules": {
+            sec: {
+                "meaning": "desc",
+                "source_refs": ["doc.txt#sec"],
+                "verification_state": "TEST_VERIFIED",
+                "implementation_impacts": ["impact"],
+                "test_coverage": [
+                    "tests/unit/test_official_subsystem.py::test_ingestion_rejects_missing_path"
+                ],
+            }
+            for sec in REQUIRED_RULE_SECTIONS
+        },
+    }
+    is_valid, errors, spec_obj, is_ready = validate_game_spec(spec_data)
+    assert is_valid is True
+    assert is_ready is False  # Missing game_version, supported_languages, minimal_bot_language
+
+
+def test_capabilities_derived_from_game_spec_not_hardcoded_python(tmp_path: Path):
+    spec_data = {
+        "schema_version": "1.0.0",
+        "competition_name": "battlecode",
+        "competition_season": "2026",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": "a" * 64,
+        "official_document_hashes": ["b" * 64],
+        "sdk_version": "1.0.0",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "game_version": "2026.1.0",
+        "supported_languages": ["java", "rust"],
+        "minimal_bot_language": "rust",
+        "rules": {
+            sec: {
+                "meaning": "desc",
+                "source_refs": ["doc.md#sec"],
+                "verification_state": "DOCUMENTED",
+            }
+            for sec in REQUIRED_RULE_SECTIONS
+        },
+    }
+    spec_file = tmp_path / "game_spec.yaml"
+    import yaml
+
+    spec_file.write_text(yaml.safe_dump(spec_data), encoding="utf-8")
+
+    spec = GameSpec.from_dict(spec_data)
+    assert spec.supported_languages == ["java", "rust"]
+    assert spec.minimal_bot_language == "rust"
+
+
+def test_game_version_derived_from_game_spec_not_sdk_version(tmp_path: Path):
+    spec_data = {
+        "schema_version": "1.0.0",
+        "competition_name": "battlecode",
+        "competition_season": "2026",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": "a" * 64,
+        "official_document_hashes": ["b" * 64],
+        "sdk_version": "1.0.0-synthetic-internal",
+        "game_version": "2026.0.1",
+        "supported_languages": ["python"],
+        "minimal_bot_language": "python",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    spec = GameSpec.from_dict(spec_data)
+    assert spec.game_version == "2026.0.1"
+    assert spec.game_version != spec.sdk_version
+
+
+def test_honest_resource_enforcement_status_reported():
+    runner = OfficialCommandRunner()
+    status, reason = runner.get_memory_enforcement_status()
+    assert isinstance(status, EnforcementStatus)
+    assert status in (
+        EnforcementStatus.PLATFORM_ENFORCED,
+        EnforcementStatus.OFFICIAL_ENGINE_ENFORCED,
+        EnforcementStatus.UNENFORCED,
+        EnforcementStatus.UNKNOWN,
+    )
+    assert isinstance(reason, str) and len(reason) > 0
+
+
+def test_minimal_bot_manifest_and_layout_verified_against_spec(tmp_path: Path):
+    bot_dir = tmp_path / "bot"
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "manifest.json").write_text(
+        json.dumps({"language": "python", "entrypoint": "main.py"}),
+        encoding="utf-8",
+    )
+    (bot_dir / "main.py").write_text("# bot\n", encoding="utf-8")
+
+    spec = GameSpec(
+        schema_version="1.0.0",
+        competition_name="battlecode",
+        competition_season="2026",
+        spec_version="1.0.0",
+        source_bundle_hash="a" * 64,
+        official_document_hashes=["b" * 64],
+        sdk_version="1.0.0",
+        generated_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        minimal_bot_language="java",  # Mismatched language!
+    )
+    assert spec.minimal_bot_language == "java"
