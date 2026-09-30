@@ -60,3 +60,27 @@
 - **Alternatives Considered**: Relying solely on root directory hash; unconditional result writes without lease verification.
 - **Why Chosen**: Guarantees complete immutability of registered artifacts and eliminates race conditions in distributed worker execution.
 
+## ADR-011: Strict Citation Grammar and AST-Verified Rule Test Node IDs (Phase 3.0.2)
+- **Context**: Rule documentation and citations could contain ambiguous paths, traversal sequences, or point to uncollected/skipped tests.
+- **Decision**: Enforce strict `<manifest-relpath>[#<fragment>]` citation grammar without colons, backslashes, or path traversal. Verify test node IDs (`<file.py>::<func>`) through AST parsing, forbidding skipped and xfailed decorators.
+- **Alternatives Considered**: Permissive string citations or relying on test filename matches.
+- **Why Chosen**: Guarantees verifiable traceability from rule specifications to authoritative documents and executable tests.
+
+## ADR-012: Typed Immutable Command Plans and Executable Mutation Checking (Phase 3.0.3)
+- **Context**: Command execution against official SDK binaries could forge arguments, pass the SDK executable as an inert argument, or substitute binaries between probe and match stages.
+- **Decision**: Introduce typed immutable `OfficialCommandPlan` (`PROBE`, `DISCOVER_MAPS`, `BUILD`, `RUN_MATCH`). Enforce canonical command prefix (`launcher_argv + [sdk_executable_path]`), forbid inert SDK path appearances elsewhere in argv, and re-hash binaries before and after execution to detect disk mutation (`InfrastructureTamperingError`).
+- **Alternatives Considered**: Permissive arbitrary command execution or assuming standard subcommands like `probe`.
+- **Why Chosen**: Prevents command identity spoofing and guarantees SDK executable provenance across all execution phases.
+
+## ADR-013: Isolated Rule Test Execution and Cryptographic JUnit Evidence Binding (Phase 3.0.3)
+- **Context**: Rule verification could be claimed via static presence or fake self-reported flags without actually running tests.
+- **Decision**: Implement `DefaultRuleTestRunner` executing `pytest --collect-only` for exact 1:1 node ID collection matching, isolated execution with `--junitxml`, requiring exit code 0, 0 failures, 0 errors, 0 skips, 0 xfails, 0 deselected tests, and clean worktree checks. Record complete collection/execution hashes and metrics in `RuleTestEvidence`.
+- **Alternatives Considered**: Trusting rule verification state flags in YAML.
+- **Why Chosen**: Guarantees that rules can only become `TEST_VERIFIED` through genuine, repeatable execution in an untampered worktree.
+
+## ADR-014: Truthful Resource Enforcement and Complete Fail-Closed Lockout (Phase 3.0.3)
+- **Context**: Competition readiness checks must not falsely report platform capabilities or allow premature submission.
+- **Decision**: Explicitly inspect and report memory enforcement status (`EnforcementStatus`), truthfully declaring Windows platform unisolated memory status as `UNENFORCED`. Lock `can_submit=false` and keep production defaults fail-closed with clear blockers until Day-0 rules and SDK are released.
+- **Alternatives Considered**: Faking memory capping or leaving submission status unconstrained.
+- **Why Chosen**: Eliminates false senses of security and adheres to the strict requirement of zero fabricated production readiness.
+
