@@ -23,7 +23,8 @@ The official Autumn competition rules and SDK have **not** been released yet. Th
 
 ## 3. Installation
 
-Battlelab requires Python 3.11+.
+Battlelab requires Python 3.11+. Release freezing also requires an authenticated GitHub CLI
+(`gh auth status`) so CI evidence can be checked against the exact reviewed commit.
 
 ```bash
 # Clone repository
@@ -134,6 +135,44 @@ battlelab replay inspect <REPLAY_HASH>
 battlelab replay verify <REPLAY_HASH>
 ```
 
+### 4.10 Competition Operations
+Use the qualification-first control plane as the single operational entrypoint:
+
+```bash
+# Current stage, progress, and exactly one next action
+battlelab competition status
+battlelab competition next
+
+# Deep status also checks Git synchronization and official readiness
+battlelab competition status --deep
+
+# Record a completed checkpoint with retained evidence
+battlelab competition complete \
+  --stage prelaunch \
+  --step registration_confirmed \
+  --actor Dang \
+  --evidence <AUTHORITATIVE_URL_OR_RECEIPT>
+```
+
+Before a qualifier or finals submission, create a fail-closed release manifest. The command
+requires a clean, upstream-synchronized reviewed commit, a GitHub Actions run URL, the active
+champion artifact, intact artifact hashes, and complete official readiness:
+
+```bash
+battlelab competition release freeze \
+  --artifact <ARTIFACT_ID> \
+  --experiment <EXPERIMENT_ID> \
+  --actor Dang \
+  --reviewed-commit <GIT_SHA> \
+  --ci-run-url https://github.com/<OWNER>/<REPO>/actions/runs/<RUN_ID> \
+  --acknowledge I_ACKNOWLEDGE_RELEASE_FREEZE
+
+battlelab competition release verify latest
+```
+
+Battlelab deliberately does not submit automatically. See
+`docs/competition_operations_runbook.md` for the complete solo workflow.
+
 ---
 
 ## 5. Storage Layout
@@ -142,6 +181,8 @@ battlelab replay verify <REPLAY_HASH>
 - Experiment Reports: `data/reports/<experiment_id>/` (`report.md` and `analysis_packet.json`).
 - Immutable Artifact Snapshots: `data/artifacts/<artifact_id>/`.
 - Active Champion Manifest: `bots/champion/champion_manifest.json`.
+- Competition Audit State: `data/competition/state.json` (atomic, hash-chained, git-ignored).
+- Frozen Release Manifests: `data/competition/releases/<release_id>.json`.
 
 ---
 

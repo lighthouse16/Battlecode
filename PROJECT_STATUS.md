@@ -1,15 +1,17 @@
 # Battlelab Project Status
 
 ## Status Summary
-- **Phase**: Phase 3.0.3 Complete (Executed Rule Evidence and Canonical SDK Command Plans)
-- **Current Milestone**: Full verifiable execution hardening, command-plan orchestration, and cryptographic evidence binding established across all pre-rule official subsystem interfaces.
+- **Phase**: Phase 3.1 Complete (Qualification-First Solo Competition Operations)
+- **Current Milestone**: The pre-rule platform now includes a frictionless, fail-closed operating layer for stage tracking, evidence checkpoints, GitHub review, and release freezing.
   - **Infrastructure Status**: Complete and verified.
     1. Typed immutable command plans (`OfficialCommandPlan`) with operation discrimination (`PROBE`, `DISCOVER_MAPS`, `BUILD`, `RUN_MATCH`), exact launcher + SDK prefix enforcement, and binary mutation detection before and after execution.
     2. Real isolated rule-test execution (`DefaultRuleTestRunner`) enforcing exact pytest collection matching, execution exit code 0, 0 failed/errored/skipped/xfailed/deselected tests, clean worktree checks, and cryptographic JUnit XML evidence binding (`RuleTestEvidence`).
     3. Evidence-backed map discovery and build manifest verification requiring real command execution and cryptographic bindings (`source_bot_hash`, `sdk_executable_sha256`, `build_command_hash`).
     4. Truthful memory enforcement reporting (`EnforcementStatus`), honestly diagnosing host platform capabilities.
     5. Spec-driven runtime definitions (`supported_languages`, `minimal_bot_language`, independent `game_version`) eliminating hardcoded Python or version derivations.
-    6. 151 automated tests passing across the repository (including all 20 Phase 3.0.3 regression tests).
+    6. Qualification-first competition plan with day-precision schedule honesty, one-next-action CLI, atomic hash-chained checkpoints, config-drift detection, and manual submission boundary.
+    7. Release freeze bound to the active immutable champion, optional promoted experiment, official provenance, exact reviewed Git commit, synchronized upstream, and GitHub Actions evidence.
+    8. 176 automated tests passing across the repository, including 24 Phase 3.1 competition-operations regression cases.
   - **Official Integration Status**: BLOCKED pending official competition release.
     - No official rules, official SDK, production bridge, legal bot, parity fixtures, or submission capability exist yet.
     - `can_submit=false` remains strictly locked.
@@ -59,6 +61,7 @@
 - [x] Phase 3.0.1 Fail-Closed Hardening: Atomic bundle staging/publishing, subprocess env/timeout sanitization, secret redaction across all exceptions, 23-rule specification binding.
 - [x] Phase 3.0.2 Verifiable Evidence: Concrete SDK evidence model, strict citation grammar (`manifest-relpath[#fragment]`), AST-verified node IDs, whole-match vs per-turn timeout semantics.
 - [x] Phase 3.0.3 Verifiable Execution: Typed `OfficialCommandPlan`, prefix matching, binary mutation detection, real isolated pytest runner with collection match and JUnit XML evidence, honest resource reporting, spec-driven runtimes, and 20 canonical regression tests.
+- [x] Phase 3.1 Qualification-First Operations: Typed competition schedule, honest unconfirmed deadline times, `competition status/next/complete`, atomic checkpoint hash chain, config-drift lockout, fail-closed release freeze/verification, GitHub CI evidence binding, and manual submission boundary.
 
 ## Currently Verified Behaviors
 - `battlelab doctor` accurately diagnoses environment, data directories, active champion, adapter readiness, and OS memory limit capabilities.
@@ -78,6 +81,7 @@
 - End-to-end demonstration script passes all 12 steps cleanly twice in clean temporary directories without repository mutation.
 - Official pre-rule readiness and fail-closed hardening verified: source ingestion (`battlelab official ingest`), typed 23-rule specification validation (`battlelab official spec`), secure command execution (`OfficialCommandRunner`), decoupled bridge architecture (`OfficialEngineBridge`), normalized replay model (`NormalizedReplay`), and fail-closed readiness assessment (`battlelab official readiness`).
 - All 20 Phase 3.0.3 canonical regression tests passing.
+- All 24 Phase 3.1 competition-operations regression cases passing, including audit tampering, reviewed config reconciliation, false readiness, live GitHub CI evidence binding, invalid CI evidence, and release-manifest tampering probes.
 
 ## Remaining Work (Day-0 External Blockers)
 - Ingestion of authoritative official rulebook and SDK (upon official competition release).
@@ -92,17 +96,18 @@
 - Windows OS stdlib does not support portable POSIX `resource.setrlimit`; truthfully reported as unsupported by `battlelab doctor`.
 
 ## Exact Commands Last Run Successfully
-- `python -m ruff format --check src tests scripts` (72 files already formatted)
+- `python -m ruff format --check src tests scripts` (77 files already formatted)
 - `python -m ruff check src tests scripts` (All checks passed!)
-- `python -m mypy src tests` (Success: no issues found in 71 source files)
-- `python -m pytest tests/` (151 passed in 189.64s)
+- `python -m mypy src tests` (Success: no issues found in 76 source files)
+- `python -m pytest tests/` (176 passed in 39.83s on Linux/Python 3.12)
 - `python scripts/demonstrate_e2e.py` (Run 1: all 12 steps completed successfully!)
 - `python scripts/demonstrate_e2e.py` (Run 2: all 12 steps completed successfully!)
 - `python -m battlelab doctor` (Exit code 0, fail-closed reported)
 - `python -m battlelab config validate` (Exit code 0)
+- `python -m battlelab competition status` (Exit code 0; prelaunch, 0/4, exact next action shown)
+- `python -m battlelab competition status --deep --json` (Exit code 0; Git synchronized, official readiness fail-closed with 14 blockers)
 - `python -m battlelab official readiness --json` (Exit code 0, ready=False, 14 blockers)
 - `python -m battlelab official status --check` (Exit code 1 as expected for unready official adapter)
 - `python -m battlelab official sdk probe /definitely/missing --json` (Exit code 1 with clean JSON error)
 - `python -m battlelab official activate --dry-run --json` (Exit code 0, status=BLOCKED)
 - `git status --porcelain` (Clean repository status)
-

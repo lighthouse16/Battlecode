@@ -25,6 +25,7 @@ data/reports/*
 data/artifacts/*
 data/runs/*
 data/scratch/*
+data/competition/*
 !data/manifests/.gitkeep
 !data/processed/.gitkeep
 !data/reports/.gitkeep

@@ -84,3 +84,8 @@
 - **Alternatives Considered**: Faking memory capping or leaving submission status unconstrained.
 - **Why Chosen**: Eliminates false senses of security and adheres to the strict requirement of zero fabricated production readiness.
 
+## ADR-015: Qualification-First Solo Operations and Manual Submission Boundary (Phase 3.1)
+- **Context**: The execution, evidence, and promotion subsystems are hardened, but a solo operator would still need to remember many commands, dates, freeze rules, and review requirements under competition pressure.
+- **Decision**: Add a thin, game-agnostic competition control plane driven by `configs/competition.yaml`. It exposes one next action at a time, records evidenced checkpoints in an atomic SHA-256 hash chain, and creates cryptographically bound release manifests only after artifact integrity, active-champion identity, clean and synchronized Git state, reviewed commit identity, GitHub Actions evidence, and official readiness all pass. Submission remains an explicit manual action.
+- **Alternatives Considered**: A fully autonomous agent that edits, promotes, and submits; free-form Markdown checklists; game-specific strategy automation before rule release.
+- **Why Chosen**: Reduces solo-operator friction and missed steps without allowing an AI agent to become its own reviewer or silently cross the external submission boundary.
