@@ -56,4 +56,11 @@ def validate_all_configs(configs_dir: Path | str) -> dict[str, list[str]]:
     prom_cfg = load_yaml_config(dir_path / "promotion.yaml")
     results["promotion.yaml"] = validate_promotion_config(prom_cfg)
 
+    competition_path = dir_path / "competition.yaml"
+    if competition_path.exists():
+        from battlelab.competition.config import validate_competition_config
+
+        competition_cfg = load_yaml_config(competition_path)
+        results["competition.yaml"] = validate_competition_config(competition_cfg)
+
     return results
