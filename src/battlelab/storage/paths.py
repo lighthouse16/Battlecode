@@ -123,3 +123,33 @@ def get_official_source_bundles_dir() -> Path:
         p = get_data_dir() / "official" / "source_bundles"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def get_competition_dir() -> Path:
+    """Return the mutable, git-ignored competition operations directory."""
+    competition_env = os.environ.get("BATTLELAB_COMPETITION_DIR")
+    if competition_env:
+        p = Path(competition_env)
+        if not p.is_absolute():
+            p = get_project_root() / p
+    else:
+        p = get_data_dir() / "competition"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_competition_state_path() -> Path:
+    state_env = os.environ.get("BATTLELAB_COMPETITION_STATE")
+    if state_env:
+        p = Path(state_env)
+        if not p.is_absolute():
+            p = get_project_root() / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    return get_competition_dir() / "state.json"
+
+
+def get_competition_releases_dir() -> Path:
+    p = get_competition_dir() / "releases"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
