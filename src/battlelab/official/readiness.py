@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from battlelab.core.errors import CapabilityNotSupportedError
 from battlelab.core.hashing import hash_bytes
 from battlelab.official._win_appexeclink import resolve_executable_for_hash
 from battlelab.official.bridge import OfficialEngineBridge, UnconfiguredOfficialBridge
@@ -833,12 +832,6 @@ class OfficialReadinessChecker:
                     if map_res.exit_code == 0:
                         discovered_maps = self.bridge.parse_map_discovery_result(map_res)
                         maps_discovered = len(discovered_maps) > 0
-                except (CapabilityNotSupportedError, NotImplementedError, AttributeError):
-                    try:
-                        discovered_maps = self.bridge.discover_maps()
-                        maps_discovered = len(discovered_maps) > 0
-                    except Exception:
-                        maps_discovered = False
                 except Exception:
                     maps_discovered = False
 
@@ -1014,22 +1007,6 @@ class OfficialReadinessChecker:
                                 build_detail = "Executed artifact build and verified cryptographic bindings in manifest"
                     else:
                         build_detail = f"Build execution failed with exit code {b_res.exit_code}: {b_res.stderr}"
-                except (CapabilityNotSupportedError, NotImplementedError, AttributeError):
-                    try:
-                        b_res_dict = self.bridge.build_or_prepare_artifact(
-                            min_bot_path, build_out_dir
-                        )
-                        if isinstance(b_res_dict, dict) and b_res_dict.get("status") in (
-                            "SUCCESS",
-                            "OK",
-                            True,
-                        ):
-                            build_succeeds = True
-                            build_detail = "Executed artifact build successfully"
-                        else:
-                            build_detail = f"Build returned unexpected response: {b_res_dict}"
-                    except Exception as e:
-                        build_detail = f"Build execution failed: {e}"
                 except Exception as e:
                     build_detail = f"Build execution failed: {e}"
 
