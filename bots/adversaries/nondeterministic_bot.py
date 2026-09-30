@@ -1,11 +1,11 @@
-"""Executable Non-deterministic Bot Fixture."""
-import sys
 import json
-import time
+import random
+import sys
+
 
 def main():
     for line in sys.stdin:
-        if int(time.time() * 1000) % 2 == 0:
+        if random.random() < 0.5:
             act = {"type": "CLAIM"}
         else:
             act = {"type": "MOVE", "direction": "UP"}

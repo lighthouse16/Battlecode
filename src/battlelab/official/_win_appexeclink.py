@@ -138,16 +138,21 @@ def resolve_appexeclink(path: Path | str) -> Path | None:
 def resolve_executable_for_hash(path: Path | str) -> Path:
     """Return the path that should be used to hash ``path``.
 
-    If ``path`` is a Windows Store AppExecLink, this returns the underlying
-    target executable after verifying it exists and is a regular non-symlink
-    file. Otherwise, returns ``path`` unchanged.
+    If ``path`` is a Windows Store AppExecLink (or a symlink to one), this
+    returns the underlying target executable after verifying it exists and is
+    a regular non-symlink file. Otherwise, returns ``path.resolve()``.
 
     The returned path is meant for hashing only; callers must continue to use
     the original ``path`` for command execution and identity checks.
     """
-    resolved = resolve_appexeclink(path)
+    p = Path(path)
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
+    resolved = resolve_appexeclink(p)
     if resolved is None:
-        return Path(path)
+        return p
 
     target = Path(resolved)
     try:

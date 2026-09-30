@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import sys
 import threading
 import time
@@ -2408,3 +2409,34 @@ def test_production_default_remains_fully_fail_closed():
     assert report.can_run_local is False
     assert report.can_submit is False
     assert len(report.blockers) > 0
+
+
+def test_launcher_symlink_resolving_to_regular_file(tmp_path: Path):
+    if platform.system() == "Windows":
+        pytest.skip("Symlink to Windows Store python stub not supported on Windows")
+
+    runner = OfficialCommandRunner()
+    exe = tmp_path / "engine.py"
+    exe.write_text("print('ok')\n", encoding="utf-8")
+    h = hash_file(exe)
+
+    launcher_sym = tmp_path / "python_symlink"
+    try:
+        launcher_sym.symlink_to(sys.executable)
+    except OSError:
+        pytest.skip("Symlink creation not supported on this OS")
+
+    from battlelab.official._win_appexeclink import resolve_executable_for_hash
+
+    launcher_h = hash_file(resolve_executable_for_hash(sys.executable))
+    plan = OfficialCommandPlan(
+        operation=PlanOperation.PROBE,
+        launcher_argv=[str(launcher_sym)],
+        sdk_executable_path=str(exe),
+        operation_argv=[],
+        cwd=str(tmp_path),
+        sdk_executable_sha256=h,
+        launcher_executable_sha256=launcher_h,
+    )
+    res = runner.execute_plan(plan)
+    assert res.exit_code == 0

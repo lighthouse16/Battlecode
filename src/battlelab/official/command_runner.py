@@ -352,13 +352,14 @@ class OfficialCommandRunner:
             if not launcher_bin.exists():
                 raise FileNotFoundError(f"Launcher binary does not exist: {launcher_bin}")
             try:
-                l_st = os.lstat(launcher_bin)
-                if stat.S_ISLNK(l_st.st_mode):
-                    raise ValueError(f"Launcher binary cannot be a symlink: {launcher_bin}")
+                resolved_launcher = launcher_bin.resolve()
+                l_st = os.stat(resolved_launcher)
                 if not stat.S_ISREG(l_st.st_mode):
-                    raise ValueError(f"Launcher binary must be a regular file: {launcher_bin}")
+                    raise ValueError(
+                        f"Launcher binary must resolve to a regular file: {launcher_bin}"
+                    )
             except OSError as e:
-                raise ValueError(f"Failed to lstat launcher binary: {e}") from None
+                raise ValueError(f"Failed to inspect launcher binary: {e}") from None
 
         # 3. Exact command identity prefix check
         full_argv = plan.get_argv()

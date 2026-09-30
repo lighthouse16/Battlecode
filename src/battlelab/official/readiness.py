@@ -330,14 +330,15 @@ def generate_sdk_evidence(
         if not launcher_bin.exists():
             return False, f"Launcher binary does not exist: {launcher_bin}", None
         try:
-            l_st = os.lstat(launcher_bin)
-            if stat.S_ISLNK(l_st.st_mode) or not stat.S_ISREG(l_st.st_mode):
+            resolved_launcher = launcher_bin.resolve()
+            l_st = os.stat(resolved_launcher)
+            if not stat.S_ISREG(l_st.st_mode):
                 return (
                     False,
-                    f"Launcher binary must be regular non-symlink file: {launcher_bin}",
+                    f"Launcher binary must resolve to a regular file: {launcher_bin}",
                     None,
                 )
-            if platform.system() != "Windows" and not os.access(launcher_bin, os.X_OK):
+            if platform.system() != "Windows" and not os.access(resolved_launcher, os.X_OK):
                 return False, f"Launcher binary is not executable: {launcher_bin}", None
         except OSError as e:
             return False, f"Failed to inspect launcher binary: {e}", None
