@@ -577,6 +577,155 @@ def cmd_official(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_competition(args: argparse.Namespace) -> int:
+    """Qualification-first competition operations commands."""
+    from battlelab.competition.workflow import CompetitionControlPlane
+
+    try:
+        control = CompetitionControlPlane(config_path=args.config)
+        as_json = getattr(args, "json", False)
+        if args.action == "status":
+            result = control.status(deep=getattr(args, "deep", False))
+            if as_json:
+                print(json.dumps(result, indent=2))
+            else:
+                stage = result["stage"]
+                progress = result["progress"]
+                print("Competition Operations Status:")
+                print(f"  Event:             {result['event_name']}")
+                print(f"  Objective:         {result['objective']}")
+                print(f"  Current Stage:     {stage['name']} ({stage['id']})")
+                print(f"  Deadline Date:     {stage['deadline_on']}")
+                if not result["deadline_time_confirmed"]:
+                    print("  Deadline Time:     UNCONFIRMED — verify official source")
+                print(f"  Stage Progress:    {progress['completed']}/{progress['total']}")
+                print(f"  Config Drift:      {result['config_drift']}")
+                print(f"  Audit Chain:       {result['audit_chain_status']}")
+                print(f"  Frozen Release:    {result['latest_release_id'] or 'None'}")
+                if progress["next_step"]:
+                    next_step = progress["next_step"]
+                    print(f"  Next Step:         {next_step['id']} — {next_step['title']}")
+                    if next_step.get("command"):
+                        print(f"  Suggested Command: {next_step['command']}")
+                else:
+                    print("  Next Step:         Stage checklist complete")
+                if getattr(args, "deep", False):
+                    readiness = result["official_readiness"]
+                    print(
+                        f"  Official Ready:    {readiness['ready']} "
+                        f"({len(readiness['blockers'])} blocker(s))"
+                    )
+                    git = result["git"]
+                    print(
+                        f"  Git:               {git['branch']} {git['head'][:12]} "
+                        f"(dirty={git['dirty']}, synced={git['synced_upstream']})"
+                    )
+            return 0
+
+        if args.action == "plan":
+            result = control.plan.to_dict()
+            result["canonical_hash"] = control.plan.canonical_hash
+            if as_json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"{control.plan.event_name} — {control.plan.objective}")
+                for stage in control.plan.stages:
+                    print(
+                        f"\n[{stage.stage_id}] {stage.name}: "
+                        f"{stage.starts_on.isoformat()} → {stage.deadline_on.isoformat()}"
+                    )
+                    for step in stage.steps:
+                        print(f"  - {step.step_id}: {step.title}")
+            return 0
+
+        if args.action == "next":
+            result = control.next_action(stage_id=getattr(args, "stage", None))
+            if as_json:
+                print(json.dumps(result, indent=2))
+            elif result["complete"]:
+                print(f"Stage {result['stage_id']} is complete.")
+            else:
+                step = result["next_step"]
+                print(f"Next: {step['title']} ({result['stage_id']}/{step['id']})")
+                if step.get("command"):
+                    print(step["command"])
+                else:
+                    print("Manual checkpoint; retain authoritative evidence before recording it.")
+            return 0
+
+        if args.action == "complete":
+            result = control.record_step(
+                stage_id=args.stage,
+                step_id=args.step,
+                actor=args.actor,
+                evidence=args.evidence,
+                note=args.note,
+            )
+            if as_json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"Recorded {args.stage}/{args.step}.")
+                print(f"  Audit Hash: {result['event_hash']}")
+                print(f"  State:      {result['state_path']}")
+            return 0
+
+        if args.action == "reconcile":
+            result = control.reconcile_config(
+                actor=args.actor,
+                reason=args.reason,
+                reviewed_commit=args.reviewed_commit,
+                acknowledgement=args.acknowledge,
+            )
+            if as_json:
+                print(json.dumps(result, indent=2))
+            else:
+                print("Competition plan change reconciled.")
+                print(f"  Old Hash:   {result['old_config_hash']}")
+                print(f"  New Hash:   {result['new_config_hash']}")
+                print(f"  Audit Hash: {result['event_hash']}")
+            return 0
+
+        if args.action == "release":
+            if args.release_action == "freeze":
+                result = control.freeze_release(
+                    artifact_id=args.artifact,
+                    experiment_id=args.experiment,
+                    actor=args.actor,
+                    reviewed_commit=args.reviewed_commit,
+                    ci_run_url=args.ci_run_url,
+                    acknowledgement=args.acknowledge,
+                    note=args.note,
+                    dry_run=args.dry_run,
+                )
+                if as_json:
+                    print(json.dumps(result, indent=2))
+                elif args.dry_run:
+                    print(f"Release freeze dry-run passed: {result['release']['release_id']}")
+                else:
+                    print(f"Frozen release: {result['release']['release_id']}")
+                    print(f"  Manifest: {result['release_path']}")
+                    print("  Submission remains manual.")
+                return 0
+            if args.release_action == "verify":
+                result = control.verify_release(args.release_ref)
+                if as_json:
+                    print(json.dumps(result, indent=2))
+                else:
+                    print(
+                        f"Release {result['release_id']}: {'VALID' if result['valid'] else 'INVALID'}"
+                    )
+                    for check in result["checks"]:
+                        print(f"  [{'PASS' if check['passed'] else 'FAIL'}] {check['name']}")
+                return 0 if result["valid"] else 1
+    except Exception as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"error": str(exc)}, indent=2))
+        else:
+            print(f"Competition operation failed: {exc}", file=sys.stderr)
+        return 1
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="battlelab",
@@ -763,6 +912,72 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_off_act.add_argument("--acknowledge-sdk", help="Explicit acknowledgement token")
     p_off_act.add_argument("--json", action="store_true", help="Output activation report as JSON")
 
+    # competition operations
+    p_comp = subparsers.add_parser(
+        "competition", help="Qualification-first solo competition operations"
+    )
+    p_comp.add_argument(
+        "--config", default="configs/competition.yaml", help="Competition plan YAML path"
+    )
+    p_comp_sub = p_comp.add_subparsers(dest="action", required=True)
+
+    p_comp_status = p_comp_sub.add_parser("status", help="Show current stage and next action")
+    p_comp_status.add_argument(
+        "--deep", action="store_true", help="Include Git and readiness checks"
+    )
+    p_comp_status.add_argument("--json", action="store_true", help="Output status as JSON")
+
+    p_comp_plan = p_comp_sub.add_parser("plan", help="Show the complete competition plan")
+    p_comp_plan.add_argument("--json", action="store_true", help="Output plan as JSON")
+
+    p_comp_next = p_comp_sub.add_parser("next", help="Show exactly one next action")
+    p_comp_next.add_argument(
+        "--stage", help="Inspect a specific stage instead of the current stage"
+    )
+    p_comp_next.add_argument("--json", action="store_true", help="Output next action as JSON")
+
+    p_comp_complete = p_comp_sub.add_parser("complete", help="Record an evidenced checkpoint")
+    p_comp_complete.add_argument("--stage", required=True, help="Competition stage ID")
+    p_comp_complete.add_argument("--step", required=True, help="Step ID within the stage")
+    p_comp_complete.add_argument("--actor", required=True, help="Real human operator identity")
+    p_comp_complete.add_argument("--evidence", required=True, help="Evidence URL, hash, or path")
+    p_comp_complete.add_argument("--note", default="", help="Optional concise note")
+    p_comp_complete.add_argument("--json", action="store_true", help="Output record as JSON")
+
+    p_comp_reconcile = p_comp_sub.add_parser(
+        "reconcile", help="Audit and accept a reviewed competition-plan change"
+    )
+    p_comp_reconcile.add_argument("--actor", required=True, help="Real human operator identity")
+    p_comp_reconcile.add_argument(
+        "--reason", required=True, help="Substantial reason for the plan change"
+    )
+    p_comp_reconcile.add_argument(
+        "--reviewed-commit", required=True, help="Reviewed and synchronized Git commit SHA"
+    )
+    p_comp_reconcile.add_argument("--acknowledge", required=True, help="Exact acknowledgement")
+    p_comp_reconcile.add_argument("--json", action="store_true", help="Output result as JSON")
+
+    p_comp_release = p_comp_sub.add_parser("release", help="Freeze and verify release candidates")
+    p_comp_release_sub = p_comp_release.add_subparsers(dest="release_action", required=True)
+    p_comp_freeze = p_comp_release_sub.add_parser(
+        "freeze", help="Create a fail-closed release manifest"
+    )
+    p_comp_freeze.add_argument("--artifact", required=True, help="Champion artifact ID")
+    p_comp_freeze.add_argument("--experiment", help="Promoted experiment ID")
+    p_comp_freeze.add_argument("--actor", required=True, help="Real human operator identity")
+    p_comp_freeze.add_argument("--reviewed-commit", required=True, help="Reviewed Git commit SHA")
+    p_comp_freeze.add_argument(
+        "--ci-run-url", required=True, help="Successful GitHub Actions run URL"
+    )
+    p_comp_freeze.add_argument("--acknowledge", required=True, help="Exact release acknowledgement")
+    p_comp_freeze.add_argument("--note", default="", help="Optional release note")
+    p_comp_freeze.add_argument("--dry-run", action="store_true", help="Run checks without writing")
+    p_comp_freeze.add_argument("--json", action="store_true", help="Output release as JSON")
+
+    p_comp_verify = p_comp_release_sub.add_parser("verify", help="Verify a frozen release")
+    p_comp_verify.add_argument("release_ref", help="Release ID or 'latest'")
+    p_comp_verify.add_argument("--json", action="store_true", help="Output verification as JSON")
+
     parsed = parser.parse_args(argv)
 
     if parsed.command == "doctor":
@@ -785,6 +1000,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_replay(parsed)
     elif parsed.command == "official":
         return cmd_official(parsed)
+    elif parsed.command == "competition":
+        return cmd_competition(parsed)
 
     return 0
 
