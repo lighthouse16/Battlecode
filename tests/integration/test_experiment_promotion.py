@@ -84,7 +84,11 @@ def test_experiment_eval_and_promotion(tmp_path: Path):
     assert champ.artifact_id == challenger.artifact_id
 
     # Test Rollback
-    rollback_res = gate.rollback(baseline.artifact_id, reason="Manual safety rollback")
+    rollback_res = gate.rollback(
+        baseline.artifact_id,
+        reason="Manual safety rollback",
+        actor="lead_researcher_alice",
+    )
     assert rollback_res["status"] == "ROLLED_BACK"
     champ_after = registry.get_champion_artifact()
     assert champ_after is not None

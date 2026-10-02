@@ -33,8 +33,8 @@ jobs:
 
       - name: Lint and Format Check (Ruff)
         run: |
-          python -m ruff format --check src tests scripts
-          python -m ruff check src tests scripts
+          python -m ruff format --check src tests scripts bots
+          python -m ruff check src tests scripts bots
 
       - name: Static Type Check (Mypy)
         run: |

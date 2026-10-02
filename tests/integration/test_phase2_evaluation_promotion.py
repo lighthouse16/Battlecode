@@ -6,6 +6,7 @@ import pytest
 
 from battlelab.bots.registry import BotRegistry
 from battlelab.core.errors import PromotionGateError
+from battlelab.core.models import Experiment
 from battlelab.experiments.evaluator import ExperimentEvaluator
 from battlelab.experiments.promotion import REQUIRED_OVERRIDE_ACKNOWLEDGEMENT, PromotionGate
 from battlelab.experiments.registry import ExperimentRegistry
@@ -180,3 +181,126 @@ def test_hardened_promotion_gates_and_override_audit(tmp_path: Path):
         # Second was rollback
         assert promotions[1]["mode"] == "ROLLBACK"
         assert promotions[1]["promoted_by"] == "lead_engineer_bob"
+
+
+def test_individual_opponent_and_seed_regression_gates():
+    """Verify promotion gate independently rejects individual opponent and seed regressions."""
+    gate = PromotionGate()
+    exp = Experiment(
+        experiment_id="exp_test_regression_gates",
+        hypothesis="Testing opponent and seed regression rejection",
+        baseline_artifact_id="art_base",
+        challenger_artifact_id="art_challenger",
+        intended_change="Tuned parameters",
+        opponent_pool_config={
+            "opponents": [
+                {"config_id": "opp_alpha", "group": "g1"},
+                {"config_id": "opp_beta", "group": "g1"},
+            ]
+        },
+        evaluation_config={"seeds": [101, 102], "maps": ["grid_tiny_4x4"]},
+    )
+
+    base_metrics = {
+        "aggregate": {
+            "total_scheduled": 20,
+            "valid_matches": 20,
+            "infrastructure_failures": 0,
+            "win_rate": 0.65,
+            "crash_rate": 0.0,
+            "timeout_rate": 0.0,
+            "invalid_action_rate": 0.0,
+            "protocol_violation_rate": 0.0,
+            "runtime_headroom": 0.30,
+        },
+        "paired_analysis": {
+            "completed_pairs": 10,
+            "mean_score_delta": 5.0,
+            "weighted_mean_win_delta": 0.15,
+            "score_delta_bootstrap_ci_95": [2.0, 8.0],
+            "win_delta_bootstrap_ci_95": [0.05, 0.25],
+            "by_opponent_group": {"g1": {"mean_win_diff": 0.15, "pair_count": 10}},
+            "by_opponent": {
+                "opp_alpha": {"mean_win_diff": 0.40, "pair_count": 5},
+                "opp_beta": {"mean_win_diff": -0.25, "pair_count": 5},  # Exceeds -0.15 limit
+            },
+            "by_map": {"grid_tiny_4x4": {"mean_win_diff": 0.15, "pair_count": 10}},
+            "by_side": {
+                "side_0": {"mean_win_diff": 0.15, "pair_count": 5},
+                "side_1": {"mean_win_diff": 0.15, "pair_count": 5},
+            },
+            "by_seed": {
+                "101": {"mean_win_diff": 0.30, "pair_count": 5},
+                "102": {"mean_win_diff": 0.0, "pair_count": 5},
+            },
+        },
+    }
+
+    # 1. Individual opponent regression triggers rejection
+    res_opp = gate.check_criteria(exp, base_metrics)
+    assert not res_opp["passed"]
+    assert any(
+        "Opponent 'opp_beta'" in v and "regressed beyond tolerance" in v
+        for v in res_opp["violations"]
+    )
+
+    # 2. Fix opponent, but introduce severe seed regression
+    metrics_seed_reg = dict(base_metrics)
+    metrics_seed_reg["paired_analysis"] = dict(base_metrics["paired_analysis"])
+    metrics_seed_reg["paired_analysis"]["by_opponent"] = {
+        "opp_alpha": {"mean_win_diff": 0.20, "pair_count": 5},
+        "opp_beta": {"mean_win_diff": 0.10, "pair_count": 5},
+    }
+    metrics_seed_reg["paired_analysis"]["by_seed"] = {
+        "101": {"mean_win_diff": 0.40, "pair_count": 5},
+        "102": {"mean_win_diff": -0.30, "pair_count": 5},  # Exceeds -0.20 limit
+    }
+    res_seed = gate.check_criteria(exp, metrics_seed_reg)
+    assert not res_seed["passed"]
+    assert any(
+        "Seed '102'" in v and "regressed beyond tolerance" in v for v in res_seed["violations"]
+    )
+
+    # 3. Protocol violation rate triggers rejection
+    metrics_proto = dict(base_metrics)
+    metrics_proto["aggregate"] = dict(base_metrics["aggregate"])
+    metrics_proto["aggregate"]["protocol_violation_rate"] = 0.05
+    res_proto = gate.check_criteria(exp, metrics_proto)
+    assert not res_proto["passed"]
+    assert any(
+        "Protocol violation rate" in v and "exceeds maximum allowable" in v
+        for v in res_proto["violations"]
+    )
+
+    # 4. Insufficient critical opponent sample size triggers rejection
+    metrics_insufficient = dict(base_metrics)
+    metrics_insufficient["paired_analysis"] = dict(base_metrics["paired_analysis"])
+    metrics_insufficient["paired_analysis"]["by_opponent"] = {
+        "opp_alpha": {"mean_win_diff": 0.20, "pair_count": 5},
+        # opp_beta is missing entirely (0 pairs)
+    }
+    res_insuf = gate.check_criteria(exp, metrics_insufficient)
+    assert not res_insuf["passed"]
+    assert any("Insufficient evidence: Opponent 'opp_beta'" in v for v in res_insuf["violations"])
+
+
+def test_duplicate_pair_detection():
+    """Verify calculate_paired_experiment_metrics detects and rejects duplicate pairs."""
+    from battlelab.analysis.metrics import calculate_paired_experiment_metrics
+
+    matches = [
+        {"pair_id": "pair_001", "bot_a_id": "challenger", "score_a": 10.0, "winner": "A"},
+        {"pair_id": "pair_001", "bot_a_id": "baseline", "score_a": 5.0, "winner": "A"},
+        # Duplicate challenger match for pair_001
+        {"pair_id": "pair_001", "bot_a_id": "challenger", "score_a": 12.0, "winner": "A"},
+    ]
+
+    import pytest
+
+    with pytest.raises(ValueError) as exc:
+        calculate_paired_experiment_metrics(
+            matches=matches,
+            challenger_id="challenger",
+            baseline_id="baseline",
+        )
+    assert "Duplicate challenger match found for pair_id 'pair_001'" in str(exc.value)

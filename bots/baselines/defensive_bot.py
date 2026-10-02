@@ -2,8 +2,10 @@
 
 Protocol: Reads JSON state per turn from stdin, writes JSON action to stdout.
 """
-import sys
+
 import json
+import sys
+
 
 def main():
     turn_idx = 0
@@ -30,9 +32,14 @@ def main():
             turn = state.get("turn", turn_idx)
             action = {"type": "MOVE", "direction": directions[turn % 4]}
 
+        req_id = state.get("_battlelab_request_id")
+        if req_id is not None:
+            action["_battlelab_request_id"] = req_id
+
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()
         turn_idx += 1
+
 
 if __name__ == "__main__":
     main()

@@ -37,8 +37,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("BATTLELAB SYSTEM DOCTOR")
     print("=" * 60)
 
-    # 1. Environment & Paths
     from battlelab.bots.process_runner import (
+        get_containment_capabilities,
         get_memory_enforcement_details,
     )
 
@@ -58,7 +58,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"Memory Safeguards:    {mem_details['status']} ({mem_details['mechanism']}: {mem_details['detail']})"
     )
 
-    # 2. Adapters
+    # 2. Containment Capabilities
+    print("\nContainment Capabilities:")
+    containment = get_containment_capabilities()
+    for name, info in containment.items():
+        label = name.replace("_", " ").title()
+        print(f"  - {label:<24} [{info['status']}] {info['mechanism']}")
+
+    # 3. Adapters
     print("\nAdapters:")
     for name in list_adapters():
         adapter = get_adapter(name)
@@ -376,8 +383,8 @@ def cmd_champion(args: argparse.Namespace) -> int:
         return 0
 
     elif args.action == "rollback":
-        reason = getattr(args, "reason", "Manual rollback via CLI")
-        actor = getattr(args, "actor", "human")
+        reason = getattr(args, "reason", "")
+        actor = getattr(args, "actor", "")
         try:
             res = gate.rollback(args.artifact_id, reason=reason, actor=actor)
             print(
@@ -688,9 +695,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "rollback", help="Roll back champion to a historical artifact"
     )
     p_champ_rb.add_argument("artifact_id", help="Historical artifact ID")
-    p_champ_rb.add_argument("--reason", default="Manual rollback", help="Reason for rollback")
     p_champ_rb.add_argument(
-        "--actor", default="human", help="Identity of actor performing rollback"
+        "--reason", required=True, help="Explicit meaningful reason for rollback"
+    )
+    p_champ_rb.add_argument(
+        "--actor", required=True, help="Explicit named identity of actor performing rollback"
     )
 
     # replay

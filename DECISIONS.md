@@ -84,3 +84,27 @@
 - **Alternatives Considered**: Faking memory capping or leaving submission status unconstrained.
 - **Why Chosen**: Eliminates false senses of security and adheres to the strict requirement of zero fabricated production readiness.
 
+## ADR-015: Coordinator Environment Isolation, Stream Bounding, and Protocol Decoupling (Phase 2 Hardening)
+- **Context**: Bot processes could inherit coordinator environment variables (including CI secrets and API keys), flood stdout/stderr channels causing deadlocks or memory exhaustion, or send out-of-turn communication without detection. Furthermore, database storage conflated illegal game actions with wire protocol violations.
+- **Decision**:
+  1. Strip all coordinator environment variables, passing only minimal allowlisted keys (`SAFE_ENV_ALLOWLIST`).
+  2. Bound stdout reads to 64 KB per line and 100 lines per turn; bound stderr capture to 500 lines / 64 KB buffer.
+  3. Detect unsolicited pre-turn output and multiple action responses per turn as protocol violations.
+  4. Decouple `protocol_violation` from `invalid_action` with dedicated database columns (idempotent schema column upgrade) and metrics.
+  5. Enforce fail-closed artifact execution without live repository fallbacks.
+  6. Add regression promotion gates for individual opponents (max -15%) and seeds (max -20%), and reject duplicate matchup pairs.
+- **Alternatives Considered**: Permissive environment inheritance, unbounded reads, single combined violation flag.
+- **Why Chosen**: Ensures bot sandboxing safety, prevents credential leakage, terminates resource exhaustion attacks, and provides clear diagnostic differentiation between bad game moves and wire-level framing defects.
+
+## ADR 008: Mock Bot Python Execution Boundary and Windows Job Object Containment
+- **Status**: ACCEPTED
+- **Date**: 2026-10-01
+- **Context**: In Phase 2 research laboratory execution, mock bots run as subprocesses. Removing `PYTHONPATH` was insufficient to prevent ambient site-packages, editable `.pth` files, and `sitecustomize` from leaking coordinator packages into bot processes. Additionally, worker process death could leave orphaned bot descendants, and promotion rollbacks lacked strict audit attribution.
+- **Decision**:
+  1. Define `MOCK_PYTHON_CODE_BOUNDARY = "IMMUTABLE_ARTIFACT + PYTHON_STDLIB"`.
+  2. Launch mock bot Python with isolated flags (`-I -S -B -u -c <bootstrap>`). The bootstrap initializes `sys.stdout`/`sys.stderr` to UTF-8, restricts `sys.path` to `[artifact_root, *safe_stdlib_paths]`, and executes the bot script via `runpy.run_path`.
+  3. Implement Windows Job Object containment (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Launch bot subprocesses with `CREATE_SUSPENDED` flag, assign the process to the Job Object, and resume its threads, preventing creation races. When worker dies or closes job handle, OS terminates all descendant processes.
+  4. Formally document threat model: `WORKER_DEATH_CHILD_CONTAINMENT` is `ENFORCED_AND_TESTED` on Windows; `FILESYSTEM_ISOLATION` is `BEST_EFFORT` via pre/post SHA-256 tamper checks (with documented TOCTOU limitation); `NETWORK_ISOLATION` is `NOT_IMPLEMENTED`.
+  5. Harden `PromotionGate.rollback()` to require non-empty `actor` and `reason`, rejecting blank or generic placeholders (`human`, `default`, `unknown`).
+- **Alternatives Considered**: Full containerization (Docker/Podman - rejected as out of scope for Phase 2), reliance on parent process monitoring alone.
+- **Why Chosen**: Provides robust, platform-native process containment on Windows, airtight Python module isolation, and auditable promotion operations without excessive infrastructure overhead.

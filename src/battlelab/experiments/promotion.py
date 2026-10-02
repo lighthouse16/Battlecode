@@ -48,8 +48,11 @@ class PromotionGate:
         min_paired_win_delta_lower_bound = cfg.get("min_paired_win_delta_lower_bound", 0.0)
         min_runtime_headroom = cfg.get("min_runtime_headroom", 0.10)
         max_group_regression_delta = cfg.get("max_group_regression_delta", -0.15)
+        max_opponent_regression_delta = cfg.get("max_opponent_regression_delta", -0.15)
         max_map_regression_delta = cfg.get("max_map_regression_delta", -0.20)
         max_side_regression_delta = cfg.get("max_side_regression_delta", -0.25)
+        max_seed_regression_delta = cfg.get("max_seed_regression_delta", -0.20)
+        max_protocol_violation_rate = cfg.get("max_protocol_violation_rate", 0.0)
         check_det = cfg.get("require_determinism_pass", True)
 
         agg = metrics.get("aggregate", {})
@@ -60,6 +63,7 @@ class PromotionGate:
         crash_rate = agg.get("crash_rate", 0.0)
         timeout_rate = agg.get("timeout_rate", 0.0)
         invalid_rate = agg.get("invalid_action_rate", 0.0)
+        protocol_rate = agg.get("protocol_violation_rate", 0.0)
         headroom = agg.get("runtime_headroom")
 
         paired = metrics.get("paired_analysis", {})
@@ -122,21 +126,34 @@ class PromotionGate:
         paired_sides = eval_cfg.get("paired_sides", True)
         expected_sides = ["side_0", "side_1"] if paired_sides else ["side_0"]
 
+        expected_opponents: list[str] = []
+        for o in opponents_list:
+            if isinstance(o, dict):
+                op_id = o.get("id") or o.get("config_id")
+                if op_id:
+                    expected_opponents.append(str(op_id))
+            elif hasattr(o, "config_id"):
+                expected_opponents.append(str(o.config_id))
+        expected_opponents = list(dict.fromkeys(expected_opponents))
+
         by_grp = paired.get("by_opponent_group", {})
         by_map = paired.get("by_map", {})
         by_side = paired.get("by_side", {})
         by_seed = paired.get("by_seed", {})
+        by_opp = paired.get("by_opponent", {})
 
         all_seeds = sorted(set(expected_seeds) | set(by_seed.keys()))
         all_maps = sorted(set(expected_maps) | set(by_map.keys()))
         all_groups = sorted(set(expected_groups) | set(by_grp.keys()))
         all_sides = sorted(set(expected_sides) | set(by_side.keys()))
+        all_opponents = sorted(set(expected_opponents) | set(by_opp.keys()))
 
         segment_sample_counts = {
             "by_seed": {s: by_seed.get(s, {}).get("pair_count", 0) for s in all_seeds},
             "by_map": {m: by_map.get(m, {}).get("pair_count", 0) for m in all_maps},
             "by_opponent_group": {g: by_grp.get(g, {}).get("pair_count", 0) for g in all_groups},
             "by_side": {s: by_side.get(s, {}).get("pair_count", 0) for s in all_sides},
+            "by_opponent": {o: by_opp.get(o, {}).get("pair_count", 0) for o in all_opponents},
         }
 
         if min_segment_sample > 0:
@@ -163,6 +180,12 @@ class PromotionGate:
                 if p_cnt < min_segment_sample:
                     violations.append(
                         f"Insufficient evidence: Side '{sd}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
+                    )
+            for o in all_opponents:
+                p_cnt = segment_sample_counts["by_opponent"][o]
+                if p_cnt < min_segment_sample:
+                    violations.append(
+                        f"Insufficient evidence: Opponent '{o}' has {p_cnt} pair(s), below minimum required segment sample size of {min_segment_sample}."
                     )
 
         # 3. Overall Win Rate threshold
@@ -223,6 +246,11 @@ class PromotionGate:
                 f"Invalid action rate {invalid_rate:.2%} exceeds maximum allowable {max_invalid:.2%}."
             )
 
+        if protocol_rate > max_protocol_violation_rate:
+            violations.append(
+                f"Protocol violation rate {protocol_rate:.2%} exceeds maximum allowable {max_protocol_violation_rate:.2%}."
+            )
+
         # 8. Opponent group regressions
         by_grp = paired.get("by_opponent_group", {})
         for grp_name, grp_stats in by_grp.items():
@@ -232,7 +260,16 @@ class PromotionGate:
                     f"Opponent group '{grp_name}' paired win delta {grp_win_d:+.2%} regressed beyond tolerance ({max_group_regression_delta:+.2%})."
                 )
 
-        # 9. Map regressions
+        # 9. Individual opponent regressions
+        by_opp = paired.get("by_opponent", {})
+        for opp_name, opp_stats in by_opp.items():
+            opp_win_d = opp_stats.get("mean_win_diff", 0.0)
+            if opp_win_d < max_opponent_regression_delta:
+                violations.append(
+                    f"Opponent '{opp_name}' paired win delta {opp_win_d:+.2%} regressed beyond tolerance ({max_opponent_regression_delta:+.2%})."
+                )
+
+        # 10. Map regressions
         by_map = paired.get("by_map", {})
         for map_name, map_stats in by_map.items():
             m_win_d = map_stats.get("mean_win_diff", 0.0)
@@ -241,7 +278,7 @@ class PromotionGate:
                     f"Map '{map_name}' paired win delta {m_win_d:+.2%} regressed beyond tolerance ({max_map_regression_delta:+.2%})."
                 )
 
-        # 10. Side regressions
+        # 11. Side regressions
         by_side = paired.get("by_side", {})
         for side_name, side_stats in by_side.items():
             s_win_d = side_stats.get("mean_win_diff", 0.0)
@@ -250,7 +287,16 @@ class PromotionGate:
                     f"Side '{side_name}' paired win delta {s_win_d:+.2%} regressed beyond tolerance ({max_side_regression_delta:+.2%})."
                 )
 
-        # 11. Multi-seed determinism check
+        # 12. Seed regressions
+        by_seed = paired.get("by_seed", {})
+        for seed_name, seed_stats in by_seed.items():
+            sd_win_d = seed_stats.get("mean_win_diff", 0.0)
+            if sd_win_d < max_seed_regression_delta:
+                violations.append(
+                    f"Seed '{seed_name}' paired win delta {sd_win_d:+.2%} regressed beyond tolerance ({max_seed_regression_delta:+.2%})."
+                )
+
+        # 13. Multi-seed determinism check
         if check_det:
             det_ok, det_err = self._verify_multi_seed_determinism(exp.challenger_artifact_id)
             if not det_ok:
@@ -275,6 +321,7 @@ class PromotionGate:
                 "crash_rate": crash_rate,
                 "timeout_rate": timeout_rate,
                 "invalid_action_rate": invalid_rate,
+                "protocol_violation_rate": protocol_rate,
             },
         }
 
@@ -505,10 +552,21 @@ class PromotionGate:
             "promoted_by": actor,
         }
 
-    def rollback(
-        self, historical_artifact_id: str, reason: str = "", actor: str = "human"
-    ) -> dict[str, Any]:
+    def rollback(self, historical_artifact_id: str, reason: str, actor: str) -> dict[str, Any]:
         """Roll back champion to a historical artifact with full audit record."""
+        if (
+            not actor
+            or not actor.strip()
+            or actor.strip().lower() in ("human", "default", "unknown")
+        ):
+            raise PromotionGateError(
+                "Rollback requires an explicit, named non-generic actor (e.g. researcher username, got empty or generic 'human')."
+            )
+        if not reason or not reason.strip():
+            raise PromotionGateError("Rollback requires an explicit, meaningful non-empty reason.")
+        clean_actor = actor.strip()
+        clean_reason = reason.strip()
+
         art = self.registry.get_artifact(historical_artifact_id)
         from battlelab.bots.artifacts import verify_artifact_integrity
 
@@ -520,7 +578,7 @@ class PromotionGate:
         previous_champion_id = current_champ.artifact_id if current_champ else None
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        rollback_reason = f"Rollback: {reason}" if reason else "Manual rollback"
+        rollback_reason = f"Rollback: {clean_reason}"
 
         manifest = self.registry.update_champion_manifest(
             artifact_id=art.artifact_id,
@@ -541,7 +599,7 @@ class PromotionGate:
             manifest_snapshot=manifest,
             reason=rollback_reason,
             mode="ROLLBACK",
-            promoted_by=actor,
+            promoted_by=clean_actor,
             previous_champion_id=previous_champion_id,
             artifact_manifest_hash=art.manifest_hash,
         )
@@ -553,5 +611,5 @@ class PromotionGate:
             "updated_at": now_iso,
             "reason": rollback_reason,
             "mode": "ROLLBACK",
-            "promoted_by": actor,
+            "promoted_by": clean_actor,
         }

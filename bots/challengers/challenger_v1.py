@@ -2,6 +2,7 @@
 
 Protocol: Reads JSON state per turn from stdin, writes JSON action to stdout.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,12 +33,7 @@ def main() -> None:
         if (px, py) not in claimed_set:
             action = {"type": "CLAIM"}
         else:
-            unclaimed = [
-                (x, y)
-                for x in range(w)
-                for y in range(h)
-                if (x, y) not in claimed_set
-            ]
+            unclaimed = [(x, y) for x in range(w) for y in range(h) if (x, y) not in claimed_set]
             if not unclaimed:
                 action = {"type": "PASS"}
             else:
@@ -73,10 +69,13 @@ def main() -> None:
                     else:
                         action = {"type": "PASS"}
 
+        req_id = state.get("_battlelab_request_id")
+        if req_id is not None:
+            action["_battlelab_request_id"] = req_id
+
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()
 
 
 if __name__ == "__main__":
     main()
-

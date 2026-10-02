@@ -160,6 +160,10 @@ if __name__ == "__main__":
             continue
         if state.get("event") == "SHUTDOWN":
             break
-        action = policy_fn(state)
+        raw_action = policy_fn(state)
+        action = dict(raw_action) if isinstance(raw_action, dict) else raw_action
+        req_id = state.get("_battlelab_request_id")
+        if req_id is not None and isinstance(action, dict):
+            action["_battlelab_request_id"] = req_id
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()

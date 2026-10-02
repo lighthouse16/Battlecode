@@ -30,7 +30,7 @@ def test_mock_adapter_contract(tmp_path: Path):
     bot_a = BotArtifact(
         artifact_id="art_a",
         display_name="FixedBot",
-        source_location="bots/fixed",
+        source_location="bots/baselines/fixed_bot.py",
         language="python",
         git_commit=None,
         dirty_worktree=False,
@@ -40,7 +40,7 @@ def test_mock_adapter_contract(tmp_path: Path):
     bot_b = BotArtifact(
         artifact_id="art_b",
         display_name="RandomBot",
-        source_location="bots/random",
+        source_location="bots/baselines/random_bot.py",
         language="python",
         git_commit=None,
         dirty_worktree=False,
@@ -82,7 +82,7 @@ def test_mock_seed_variation(tmp_path: Path):
     bot_a = BotArtifact(
         artifact_id="art_rand1",
         display_name="RandomBot",
-        source_location="bots/rand",
+        source_location="bots/baselines/random_bot.py",
         language="python",
         git_commit=None,
         dirty_worktree=False,
@@ -92,7 +92,7 @@ def test_mock_seed_variation(tmp_path: Path):
     bot_b = BotArtifact(
         artifact_id="art_rand2",
         display_name="RandomBot2",
-        source_location="bots/rand",
+        source_location="bots/baselines/random_bot.py",
         language="python",
         git_commit=None,
         dirty_worktree=False,

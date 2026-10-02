@@ -257,7 +257,11 @@ for line in sys.stdin:
     if not line.strip(): continue
     state = json.loads(line)
     if state.get("event") == "SHUTDOWN": break
-    sys.stdout.write(json.dumps({"type": "CLAIM"}) + "\\n")
+    act = {"type": "CLAIM"}
+    req_id = state.get("_battlelab_request_id")
+    if req_id is not None:
+        act["_battlelab_request_id"] = req_id
+    sys.stdout.write(json.dumps(act) + "\\n")
     sys.stdout.flush()
 """,
         encoding="utf-8",
@@ -690,7 +694,12 @@ def test_22_active_cancellation_terminates_on_lost_lease(tmp_path: Path):
 for line in sys.stdin:
     if not line.strip(): continue
     time.sleep(0.01)
-    sys.stdout.write(json.dumps({"type": "PASS"}) + "\\n")
+    state = json.loads(line)
+    act = {"type": "PASS"}
+    req_id = state.get("_battlelab_request_id")
+    if req_id is not None:
+        act["_battlelab_request_id"] = req_id
+    sys.stdout.write(json.dumps(act) + "\\n")
     sys.stdout.flush()
 """,
         encoding="utf-8",
@@ -995,7 +1004,8 @@ def test_29_bytecode_generation_disabled(tmp_path: Path):
         "import sys, json\n"
         "for line in sys.stdin:\n"
         "    if not line.strip(): continue\n"
-        "    print(json.dumps({'action': 'MOVE', 'turn': 1}), flush=True)\n",
+        "    req_id = json.loads(line).get('_battlelab_request_id')\n"
+        "    print(json.dumps({'action': 'MOVE', 'turn': 1, '_battlelab_request_id': req_id}), flush=True)\n",
         encoding="utf-8",
     )
 

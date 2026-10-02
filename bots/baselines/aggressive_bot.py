@@ -2,8 +2,10 @@
 
 Protocol: Reads JSON state per turn from stdin, writes JSON action to stdout.
 """
-import sys
+
 import json
+import sys
+
 
 def main():
     for line in sys.stdin:
@@ -35,8 +37,13 @@ def main():
             else:
                 action = {"type": "CLAIM"}
 
+        req_id = state.get("_battlelab_request_id")
+        if req_id is not None:
+            action["_battlelab_request_id"] = req_id
+
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()
+
 
 if __name__ == "__main__":
     main()

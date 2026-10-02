@@ -181,6 +181,8 @@ class MatchResult:
     timed_out_b: bool = False
     invalid_action_a: bool = False
     invalid_action_b: bool = False
+    protocol_violation_a: bool = False
+    protocol_violation_b: bool = False
     replay_path: str | None = None
     replay_hash: str | None = None
     stdout_path: str | None = None

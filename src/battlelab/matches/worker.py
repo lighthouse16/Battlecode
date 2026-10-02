@@ -29,6 +29,10 @@ def execute_match_job(
 ) -> dict[str, Any]:
     """Execute a single match job safely with renewable heartbeat leases and fencing."""
     spec = MatchSpec.from_dict(spec_dict)
+    if db_path is not None:
+        import os
+
+        os.environ["BATTLELAB_DATABASE_PATH"] = str(Path(db_path).resolve())
     db = Database(db_path)
     registry = BotRegistry(db)
     replay_store = ReplayStore()

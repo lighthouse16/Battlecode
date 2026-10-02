@@ -2,8 +2,10 @@
 
 Protocol: Reads JSON state per turn from stdin, writes JSON action to stdout.
 """
-import sys
+
 import json
+import sys
+
 
 def main():
     for line in sys.stdin:
@@ -21,7 +23,7 @@ def main():
         my_pos = state.get("your_pos", [0, 0])
         claimed = state.get("claimed_tiles", [])
         already_claimed = any(t.get("x") == my_pos[0] and t.get("y") == my_pos[1] for t in claimed)
-        
+
         if not already_claimed:
             action = {"type": "CLAIM"}
         else:
@@ -39,8 +41,13 @@ def main():
             else:
                 action = {"type": "MOVE", "direction": "RIGHT" if my_pos[0] + 1 < w else "LEFT"}
 
+        req_id = state.get("_battlelab_request_id")
+        if req_id is not None:
+            action["_battlelab_request_id"] = req_id
+
         sys.stdout.write(json.dumps(action) + "\n")
         sys.stdout.flush()
+
 
 if __name__ == "__main__":
     main()

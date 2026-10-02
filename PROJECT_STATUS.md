@@ -9,10 +9,11 @@
     3. Evidence-backed map discovery and build manifest verification requiring real command execution and cryptographic bindings (`source_bot_hash`, `sdk_executable_sha256`, `build_command_hash`).
     4. Truthful memory enforcement reporting (`EnforcementStatus`), honestly diagnosing host platform capabilities.
     5. Spec-driven runtime definitions (`supported_languages`, `minimal_bot_language`, independent `game_version`) eliminating hardcoded Python or version derivations.
-    6. 151 automated tests passing across the repository (including all 20 Phase 3.0.3 regression tests).
+    6. 184 automated tests passing across the repository (1 skipped).
   - **Official Integration Status**: BLOCKED pending official competition release.
     - No official rules, official SDK, production bridge, legal bot, parity fixtures, or submission capability exist yet.
     - `can_submit=false` remains strictly locked.
+
     - Production adapter defaults to `UnconfiguredOfficialBridge` and remains fail-closed by design.
 - **Engine Status**: 
   - `MockAdapter`: Real subprocess execution over line-delimited JSON stdin/stdout protocol strictly from frozen, cryptographically verified artifact snapshots (`data/artifacts/<id>/`). Produces normalized replay contracts.
@@ -54,14 +55,18 @@
 - [x] Champion Rollback CLI: `battlelab champion rollback` atomically restores historical champion and documents audit record without foreign key violations.
 - [x] CLI `--entrypoint` Option: Added `--entrypoint` argument to `battlelab bot register` with validation.
 - [x] Isolated & Repeatable E2E Demonstration (`scripts/demonstrate_e2e.py`): Fully isolated via `tempfile.TemporaryDirectory()`, tests pause (`INTERRUPTED 2/8`) and resume (`COMPLETED 8/8`), with zero repository mutation.
-- [x] GitHub Actions CI Matrix: Complete matrix workflow (`.github/workflows/ci.yml`) on Ubuntu/Windows for Python 3.11 and 3.12 running ruff format, ruff check, mypy, pytest, demonstrate_e2e twice, CLI tournament, and working tree cleanliness check.
-- [x] Complete automated test suite: 151 unit, integration, and contract tests passing.
+- [x] GitHub Actions CI Matrix: Complete matrix workflow (`.github/workflows/ci.yml`) on Ubuntu/Windows for Python 3.11 and 3.12 (Run 36659298590 verified commit `8aa727e88e118c4cfabbdef645b61e8086807847`; current uncommitted working tree is NOT YET VERIFIED BY REMOTE CI).
+- [x] Complete automated test suite: 184 unit, integration, and contract tests passing (1 skipped).
+- [x] Phase 2 Isolation & Protocol Hardening: Environment allowlisting (`SAFE_ENV_ALLOWLIST`) stripping coordinator secrets; 64KB line read and 500 lines/64KB stderr bounding; detection of pre-turn and multiple-action communication; idempotent database schema column upgrades adding distinct `protocol_violation_a/b` columns; fail-closed artifact snapshot resolution with zero live fallback; multiprocess scheduler leasing and lease expiry recovery across independent OS processes; regression promotion gates for individual opponents (max -15%) and seeds (max -20%); duplicate pair detection (`ValueError`).
+- [x] Python Isolated Source Boundary: `MOCK_PYTHON_CODE_BOUNDARY = IMMUTABLE_ARTIFACT + PYTHON_STDLIB`. Python launches in isolated mode (`-I -S -B -u -c <bootstrap>`), preventing leakage of coordinator packages, editable `.pth` files, `PYTHONPATH`, and ambient site-packages.
+- [x] Hard Worker-Death Child Containment: Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) with `CREATE_SUSPENDED` launch eliminates process creation races. Worker PID, bot PID, and grandchild PID deaths upon hard kill verified with clean lease recovery.
+- [x] Hardened Promotion Rollback Audit: `PromotionGate.rollback()` strictly enforces non-empty, non-generic actor and reason, recording complete audit records without foreign key errors.
 - [x] Phase 3.0.1 Fail-Closed Hardening: Atomic bundle staging/publishing, subprocess env/timeout sanitization, secret redaction across all exceptions, 23-rule specification binding.
 - [x] Phase 3.0.2 Verifiable Evidence: Concrete SDK evidence model, strict citation grammar (`manifest-relpath[#fragment]`), AST-verified node IDs, whole-match vs per-turn timeout semantics.
 - [x] Phase 3.0.3 Verifiable Execution: Typed `OfficialCommandPlan`, prefix matching, binary mutation detection, real isolated pytest runner with collection match and JUnit XML evidence, honest resource reporting, spec-driven runtimes, and 20 canonical regression tests.
 
 ## Currently Verified Behaviors
-- `battlelab doctor` accurately diagnoses environment, data directories, active champion, adapter readiness, and OS memory limit capabilities.
+- `battlelab doctor` accurately diagnoses environment, data directories, active champion, adapter readiness, process containment, and OS memory limit capabilities.
 - `battlelab config validate` parses and validates all YAML configs in `configs/`.
 - `battlelab champion status` and `battlelab champion rollback` manage champion manifest state and write full DB audit logs.
 - Hard 10ms timeout verified: returns in < 0.8s on 10ms limit without leaving orphan processes alive.
@@ -90,19 +95,19 @@
 - Official SDK/rules not released; official adapter is non-operational and fail-closed by design (`can_run_local: false`, `can_submit: false`).
 - Synthetic test SDK exists strictly under `tests/fixtures/synthetic_sdk/` for testing generic orchestration, timeouts, and contracts; never used in production.
 - Windows OS stdlib does not support portable POSIX `resource.setrlimit`; truthfully reported as unsupported by `battlelab doctor`.
+- Threat Model: Trusted-code research laboratory, not a hostile multi-tenant sandbox.
+  - `FILESYSTEM_ISOLATION`: `BEST_EFFORT` via SHA-256 pre/post tamper checks. An active bot process could theoretically mutate untracked files or coordinator files during execution before being detected post-match (inherent TOCTOU limitation).
+  - `NETWORK_ISOLATION`: `NOT_IMPLEMENTED`. Mock bots run with host network access.
+  - `WORKER_DEATH_CHILD_CONTAINMENT`: `ENFORCED_AND_TESTED` on Windows via Job Objects; `PLATFORM_DEPENDENT` on POSIX (process group cleanup, no kernel parent-death signal).
 
 ## Exact Commands Last Run Successfully
-- `python -m ruff format --check src tests scripts` (72 files already formatted)
-- `python -m ruff check src tests scripts` (All checks passed!)
-- `python -m mypy src tests` (Success: no issues found in 71 source files)
-- `python -m pytest tests/` (151 passed in 189.64s)
-- `python scripts/demonstrate_e2e.py` (Run 1: all 12 steps completed successfully!)
-- `python scripts/demonstrate_e2e.py` (Run 2: all 12 steps completed successfully!)
+- `python -m ruff format --check src tests scripts bots` (85 files already formatted)
+- `python -m ruff check src tests scripts bots` (All checks passed!)
+- `python -m mypy src tests` (Success: no issues found in 72 source files)
+- `python -m pytest tests/` (184 passed, 1 skipped in 381.13s)
+- `python scripts/demonstrate_e2e.py` (All 12 demonstration steps completed successfully!)
 - `python -m battlelab doctor` (Exit code 0, fail-closed reported)
 - `python -m battlelab config validate` (Exit code 0)
 - `python -m battlelab official readiness --json` (Exit code 0, ready=False, 14 blockers)
-- `python -m battlelab official status --check` (Exit code 1 as expected for unready official adapter)
-- `python -m battlelab official sdk probe /definitely/missing --json` (Exit code 1 with clean JSON error)
-- `python -m battlelab official activate --dry-run --json` (Exit code 0, status=BLOCKED)
-- `git status --porcelain` (Clean repository status)
+- `git diff --check` (Exit code 0, clean whitespace)
 

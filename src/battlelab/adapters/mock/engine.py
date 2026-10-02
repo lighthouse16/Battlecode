@@ -44,6 +44,8 @@ class EngineResult:
     invalid_action_p1: bool = False
     protocol_violation_p0: bool = False
     protocol_violation_p1: bool = False
+    protocol_reason_p0: str = ""
+    protocol_reason_p1: str = ""
     crashed_p0: bool = False
     crashed_p1: bool = False
     timed_out_p0: bool = False
@@ -100,12 +102,6 @@ class MockEngine:
         start_time = time.perf_counter()
         turn_timeout_sec = max(0.005, per_turn_limit_ms / 1000.0)
 
-        # Start subprocesses
-        bot_proc_0.start()
-        bot_proc_1.start()
-
-        self._record_frame("INIT", {})
-
         crashed_p0 = False
         crashed_p1 = False
         timed_out_p0 = False
@@ -114,9 +110,17 @@ class MockEngine:
         invalid_p1 = False
         protocol_p0 = False
         protocol_p1 = False
+        protocol_reason_p0 = ""
+        protocol_reason_p1 = ""
         cancelled = False
 
         try:
+            # Start subprocesses
+            bot_proc_0.start()
+            bot_proc_1.start()
+
+            self._record_frame("INIT", {})
+
             while self.current_turn < self.max_turns:
                 # Check active cancellation
                 if cancel_event and cancel_event.is_set():
@@ -147,9 +151,11 @@ class MockEngine:
                     crashed_p0 = True
                     self._record_frame("CRASH", {"player": 0, "stderr": status_0["stderr"]})
                     break
-                elif status_0["malformed"]:
+                elif status_0.get("protocol_violation") or status_0.get("malformed"):
                     protocol_p0 = True
-                    invalid_p0 = True
+                    protocol_reason_p0 = str(
+                        status_0.get("reason") or status_0.get("raw_output", "")
+                    )
                     self._record_frame(
                         "PROTOCOL_VIOLATION", {"player": 0, "raw": status_0["raw_output"]}
                     )
@@ -183,9 +189,11 @@ class MockEngine:
                     crashed_p1 = True
                     self._record_frame("CRASH", {"player": 1, "stderr": status_1["stderr"]})
                     break
-                elif status_1["malformed"]:
+                elif status_1.get("protocol_violation") or status_1.get("malformed"):
                     protocol_p1 = True
-                    invalid_p1 = True
+                    protocol_reason_p1 = str(
+                        status_1.get("reason") or status_1.get("raw_output", "")
+                    )
                     self._record_frame(
                         "PROTOCOL_VIOLATION", {"player": 1, "raw": status_1["raw_output"]}
                     )
@@ -232,6 +240,8 @@ class MockEngine:
             invalid_action_p1=invalid_p1,
             protocol_violation_p0=protocol_p0,
             protocol_violation_p1=protocol_p1,
+            protocol_reason_p0=protocol_reason_p0,
+            protocol_reason_p1=protocol_reason_p1,
             crashed_p0=crashed_p0,
             crashed_p1=crashed_p1,
             timed_out_p0=timed_out_p0,

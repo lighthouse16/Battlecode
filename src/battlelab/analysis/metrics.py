@@ -36,6 +36,7 @@ def calculate_tournament_metrics(
     crashes = 0
     timeouts = 0
     invalid_actions = 0
+    protocol_violations = 0
     missing_replays = 0
     durations: list[float] = []
 
@@ -46,10 +47,10 @@ def calculate_tournament_metrics(
     by_seed: dict[str, dict[str, Any]] = {}
 
     for m in matches:
-        is_bot_a = (m["bot_a_id"] == focus_bot_id) if focus_bot_id else True
-        opp_id = m["bot_b_id"] if is_bot_a else m["bot_a_id"]
-        map_name = m["map_name"]
-        seed_key = str(m["seed"])
+        is_bot_a = (m.get("bot_a_id") == focus_bot_id) if focus_bot_id else True
+        opp_id = m.get("bot_b_id", "") if is_bot_a else m.get("bot_a_id", "")
+        map_name = m.get("map_name", "unknown")
+        seed_key = str(m.get("seed", 0))
 
         side_assignment = m.get("side_assignment_json", "")
         side_label = "side_0" if '"A": "side_0"' in side_assignment else "side_1"
@@ -65,6 +66,10 @@ def calculate_tournament_metrics(
             timeouts += 1
         if (is_bot_a and m.get("invalid_action_a")) or (not is_bot_a and m.get("invalid_action_b")):
             invalid_actions += 1
+        if (is_bot_a and m.get("protocol_violation_a")) or (
+            not is_bot_a and m.get("protocol_violation_b")
+        ):
+            protocol_violations += 1
         if not m.get("replay_path") or not m.get("replay_hash"):
             missing_replays += 1
 
@@ -144,6 +149,10 @@ def calculate_tournament_metrics(
         "invalid_action_rate": (
             round(invalid_actions / total_scheduled, 4) if total_scheduled > 0 else 0.0
         ),
+        "protocol_violation_count": protocol_violations,
+        "protocol_violation_rate": (
+            round(protocol_violations / total_scheduled, 4) if total_scheduled > 0 else 0.0
+        ),
         "missing_replays": missing_replays,
         "runtime_percentiles_ms": {
             "p50": round(p50, 2),
@@ -184,8 +193,16 @@ def calculate_paired_experiment_metrics(
             pairs[pair_id] = {}
 
         if m["bot_a_id"] == challenger_id:
+            if "challenger" in pairs[pair_id]:
+                raise ValueError(
+                    f"Duplicate challenger match found for pair_id '{pair_id}': multiple observations for challenger."
+                )
             pairs[pair_id]["challenger"] = m
         elif m["bot_a_id"] == baseline_id:
+            if "baseline" in pairs[pair_id]:
+                raise ValueError(
+                    f"Duplicate baseline match found for pair_id '{pair_id}': multiple observations for baseline."
+                )
             pairs[pair_id]["baseline"] = m
 
     # Build opponent lookup
@@ -267,8 +284,12 @@ def calculate_paired_experiment_metrics(
     seed_score_deltas: dict[str, list[float]] = {}
     seed_win_deltas: dict[str, list[float]] = {}
 
+    incomplete_pairs_count = 0
+    infrastructure_failed_pairs_count = 0
+
     for pair_id, pair_data in pairs.items():
         if "challenger" not in pair_data or "baseline" not in pair_data:
+            incomplete_pairs_count += 1
             continue
 
         m_c = pair_data["challenger"]
@@ -279,6 +300,7 @@ def calculate_paired_experiment_metrics(
             m_c.get("outcome") == "INFRASTRUCTURE_FAILURE"
             or m_b.get("outcome") == "INFRASTRUCTURE_FAILURE"
         ):
+            infrastructure_failed_pairs_count += 1
             continue
 
         score_c = float(m_c.get("score_a", 0.0))
@@ -557,7 +579,10 @@ def calculate_paired_experiment_metrics(
     return {
         "aggregate": overall,
         "paired_analysis": {
+            "total_pairs_indexed": len(pairs),
             "completed_pairs": len(score_diffs),
+            "incomplete_pairs_count": incomplete_pairs_count,
+            "infrastructure_failed_pairs_count": infrastructure_failed_pairs_count,
             "mean_score_delta": round(weighted_mean_score_diff, 4),
             "score_delta_bootstrap_ci_95": [
                 round(weighted_score_ci_l, 4),
