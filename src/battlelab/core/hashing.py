@@ -4,8 +4,55 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass
+class ProtectedFileState:
+    exists: bool
+    readable: bool
+    sha256: str | None = None
+    error: str | None = None
+
+    def matches(self, other: ProtectedFileState) -> bool:
+        """Check if post-state matches pre-state without tampering."""
+        if not self.exists and not other.exists:
+            return True
+        if self.exists != other.exists:
+            return False
+        if not self.readable or not other.readable:
+            return False
+        return self.sha256 == other.sha256
+
+
+def get_protected_file_state(file_path: Path | str) -> ProtectedFileState:
+    """Safely inspect a protected file's existence, readability, and SHA-256 digest.
+
+    Catches all OSError, PermissionError, and filesystem exceptions to prevent
+    unhandled crashes when inspecting files modified by adversarial code.
+    """
+    path = Path(file_path)
+    try:
+        if not path.exists():
+            return ProtectedFileState(exists=False, readable=False, sha256=None, error=None)
+        if not path.is_file():
+            return ProtectedFileState(
+                exists=True, readable=False, sha256=None, error="Not a regular file"
+            )
+    except Exception as e:
+        return ProtectedFileState(
+            exists=True, readable=False, sha256=None, error=f"Stat error: {e}"
+        )
+
+    try:
+        digest = hash_file(path)
+        return ProtectedFileState(exists=True, readable=True, sha256=digest, error=None)
+    except Exception as e:
+        return ProtectedFileState(
+            exists=True, readable=False, sha256=None, error=f"Read error: {e}"
+        )
 
 
 def hash_bytes(data: bytes) -> str:

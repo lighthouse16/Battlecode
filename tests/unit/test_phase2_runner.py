@@ -15,6 +15,7 @@ from battlelab.bots.process_runner import (
     is_process_active,
     terminate_process_tree,
 )
+from battlelab.core.hashing import ProtectedFileState
 from battlelab.core.models import BotArtifact, FailureCategory, MatchOutcome, MatchSpec
 
 
@@ -1571,3 +1572,171 @@ for line in sys.stdin:
     assert not res.crashed_a and not res.crashed_b
     assert not res.timed_out_a and not res.timed_out_b
     assert res.turns_played > 1
+
+
+def test_unreadable_champion_manifest_pre_match_fails_closed(tmp_path: Path, monkeypatch):
+    """Verify that unreadable champion manifest pre-match causes coordinator to fail closed."""
+    import battlelab.adapters.mock.adapter as mock_adapter_mod
+
+    champ_file = tmp_path / "champion.json"
+    champ_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("BATTLELAB_CHAMPION_MANIFEST", str(champ_file))
+
+    orig_get_state = mock_adapter_mod.get_protected_file_state
+
+    def fake_get_state(p):
+        if Path(p).resolve() == champ_file.resolve():
+            return ProtectedFileState(
+                exists=True, readable=False, error="Permission denied [Errno 13]"
+            )
+        return orig_get_state(p)
+
+    monkeypatch.setattr(mock_adapter_mod, "get_protected_file_state", fake_get_state)
+
+    mock = get_adapter("mock")
+    fixed = create_bot_artifact(Path("bots/baselines/fixed_bot.py"), display_name="FixedPreChamp")
+    spec = MatchSpec(
+        match_id="m_pre_champ_unreadable",
+        adapter_name="mock",
+        adapter_version=mock.version,
+        bot_a_id=fixed.artifact_id,
+        bot_b_id=fixed.artifact_id,
+        map_name="grid_tiny_4x4",
+        seed=1,
+    )
+    res = mock.run_local_match(spec, fixed, fixed, tmp_path / "work_pre_champ")
+    assert res.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE
+    assert res.failure_classification is not None
+    assert res.failure_classification.category == FailureCategory.STORAGE_FAILURE
+    assert "Pre-match champion manifest cannot be verified" in res.failure_classification.evidence
+
+
+def test_unreadable_champion_manifest_post_match_tampering_detected(tmp_path: Path, monkeypatch):
+    """Verify that champion manifest becoming unreadable post-match is detected as tampering."""
+    import battlelab.adapters.mock.adapter as mock_adapter_mod
+
+    champ_file = tmp_path / "champion.json"
+    champ_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("BATTLELAB_CHAMPION_MANIFEST", str(champ_file))
+
+    orig_get_state = mock_adapter_mod.get_protected_file_state
+    champ_call_count = 0
+
+    def fake_get_state(p):
+        nonlocal champ_call_count
+        if Path(p).resolve() == champ_file.resolve():
+            champ_call_count += 1
+            if champ_call_count > 1:
+                return ProtectedFileState(
+                    exists=True, readable=False, error="Permission denied [Errno 13]"
+                )
+        return orig_get_state(p)
+
+    monkeypatch.setattr(mock_adapter_mod, "get_protected_file_state", fake_get_state)
+
+    mock = get_adapter("mock")
+    fixed = create_bot_artifact(Path("bots/baselines/fixed_bot.py"), display_name="FixedPostChamp")
+    spec = MatchSpec(
+        match_id="m_post_champ_unreadable",
+        adapter_name="mock",
+        adapter_version=mock.version,
+        bot_a_id=fixed.artifact_id,
+        bot_b_id=fixed.artifact_id,
+        map_name="grid_tiny_4x4",
+        seed=1,
+    )
+    res = mock.run_local_match(spec, fixed, fixed, tmp_path / "work_post_champ")
+    assert res.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE
+    assert res.failure_classification is not None
+    assert res.failure_classification.category == FailureCategory.STORAGE_FAILURE
+    assert "champion manifest tampering detected" in res.failure_classification.evidence
+
+
+def test_unreadable_cross_artifact_manifest_post_match_tampering_detected(
+    tmp_path: Path, monkeypatch
+):
+    """Verify that cross-artifact manifest becoming unreadable post-match is detected as tampering."""
+    import battlelab.adapters.mock.adapter as mock_adapter_mod
+
+    art_root = tmp_path / "artifacts"
+    art_root.mkdir()
+    monkeypatch.setenv("BATTLELAB_ARTIFACTS_DIR", str(art_root))
+
+    victim = create_bot_artifact(
+        Path("bots/baselines/resource_bot.py"),
+        display_name="VictimCross",
+    )
+    victim_manifest = Path(victim.source_location) / "manifest.json"
+    assert victim_manifest.exists()
+
+    orig_get_state = mock_adapter_mod.get_protected_file_state
+    victim_call_count = 0
+
+    def fake_get_state(p):
+        nonlocal victim_call_count
+        if Path(p).resolve() == victim_manifest.resolve():
+            victim_call_count += 1
+            if victim_call_count > 1:
+                return ProtectedFileState(
+                    exists=True, readable=False, error="Permission denied [Errno 13]"
+                )
+        return orig_get_state(p)
+
+    monkeypatch.setattr(mock_adapter_mod, "get_protected_file_state", fake_get_state)
+
+    mock = get_adapter("mock")
+    fixed = create_bot_artifact(Path("bots/baselines/fixed_bot.py"), display_name="FixedCross")
+    spec = MatchSpec(
+        match_id="m_cross_art_unreadable",
+        adapter_name="mock",
+        adapter_version=mock.version,
+        bot_a_id=fixed.artifact_id,
+        bot_b_id=fixed.artifact_id,
+        map_name="grid_tiny_4x4",
+        seed=1,
+    )
+    res = mock.run_local_match(spec, fixed, fixed, tmp_path / "work_cross_art")
+    assert res.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE
+    assert res.failure_classification is not None
+    assert res.failure_classification.category == FailureCategory.STORAGE_FAILURE
+    assert "Cross-artifact tampering detected" in res.failure_classification.evidence
+
+
+def test_unreadable_participant_manifest_post_match_tampering_detected(tmp_path: Path, monkeypatch):
+    """Verify that participant manifest becoming unreadable post-match is detected as tampering."""
+    import battlelab.adapters.mock.adapter as mock_adapter_mod
+
+    mock = get_adapter("mock")
+    bot_a = create_bot_artifact(Path("bots/baselines/fixed_bot.py"), display_name="FixedPartA")
+    bot_b = create_bot_artifact(Path("bots/baselines/fixed_bot.py"), display_name="FixedPartB")
+    a_manifest = Path(bot_a.source_location) / "manifest.json"
+
+    orig_get_state = mock_adapter_mod.get_protected_file_state
+    a_call_count = 0
+
+    def fake_get_state(p):
+        nonlocal a_call_count
+        if Path(p).resolve() == a_manifest.resolve():
+            a_call_count += 1
+            if a_call_count > 1:
+                return ProtectedFileState(
+                    exists=True, readable=False, error="Permission denied [Errno 13]"
+                )
+        return orig_get_state(p)
+
+    monkeypatch.setattr(mock_adapter_mod, "get_protected_file_state", fake_get_state)
+
+    spec = MatchSpec(
+        match_id="m_part_art_unreadable",
+        adapter_name="mock",
+        adapter_version=mock.version,
+        bot_a_id=bot_a.artifact_id,
+        bot_b_id=bot_b.artifact_id,
+        map_name="grid_tiny_4x4",
+        seed=1,
+    )
+    res = mock.run_local_match(spec, bot_a, bot_b, tmp_path / "work_part_art")
+    assert res.outcome == MatchOutcome.INFRASTRUCTURE_FAILURE
+    assert res.failure_classification is not None
+    assert res.failure_classification.category == FailureCategory.STORAGE_FAILURE
+    assert "manifest became unreadable" in res.failure_classification.evidence

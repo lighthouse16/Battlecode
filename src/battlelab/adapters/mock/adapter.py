@@ -13,7 +13,7 @@ from battlelab.adapters.mock.engine import MockEngine
 from battlelab.adapters.mock.maps import MOCK_MAPS
 from battlelab.bots.artifacts import verify_artifact_integrity
 from battlelab.bots.process_runner import BotStartupError, BotSubprocess
-from battlelab.core.hashing import hash_file
+from battlelab.core.hashing import ProtectedFileState, get_protected_file_state, hash_file
 from battlelab.core.models import (
     BotArtifact,
     Capability,
@@ -72,7 +72,10 @@ def _snapshot_protected_db_state(db_path: Path, current_match_id: str) -> dict[s
         }
     except Exception:
         try:
-            return {"is_sqlite": False, "raw_hash": hash_file(db_path)}
+            st = get_protected_file_state(db_path)
+            if st.exists and st.readable:
+                return {"is_sqlite": False, "raw_hash": st.sha256}
+            return None
         except Exception:
             return None
 
@@ -83,12 +86,15 @@ def _verify_protected_db_state(
     """Verify protected invariants: allow coordinator heartbeats, reject unauthorized mutations."""
     if pre_state is None:
         return True, "No pre-state recorded"
-    if not db_path.exists():
+
+    db_st = get_protected_file_state(db_path)
+    if not db_st.exists:
         return False, "Tournament database was deleted during match execution"
+    if not db_st.readable:
+        return False, f"Tournament database tampering detected: unreadable database ({db_st.error})"
 
     if not pre_state.get("is_sqlite", True):
-        post_hash = hash_file(db_path)
-        if post_hash != pre_state.get("raw_hash"):
+        if db_st.sha256 != pre_state.get("raw_hash"):
             return False, "Tournament database tampering detected during match execution"
         return True, "Valid"
 
@@ -337,48 +343,96 @@ class MockAdapter(GameAdapter):
             )
 
         # Check pre-match integrity of participant artifacts if snapshot manifests exist
-        if (Path(bot_a.source_location) / "manifest.json").exists():
-            ok_a, msg_a = verify_artifact_integrity(bot_a)
-            if not ok_a:
+        for bot_p, label in ((bot_a, "Bot A"), (bot_b, "Bot B")):
+            try:
+                m_path = Path(bot_p.source_location) / "manifest.json"
+                m_st = get_protected_file_state(m_path)
+                if m_st.exists and not m_st.readable:
+                    return MatchResult(
+                        match_id=spec.match_id,
+                        outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                        failure_classification=FailureClassification(
+                            category=FailureCategory.STORAGE_FAILURE,
+                            culprit="system",
+                            evidence=f"Pre-match {label} manifest cannot be read ({m_path}): {m_st.error}",
+                        ),
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                if m_st.exists or bool(getattr(bot_p, "manifest_hash", None)):
+                    ok, msg = verify_artifact_integrity(bot_p)
+                    if not ok:
+                        return MatchResult(
+                            match_id=spec.match_id,
+                            outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                            failure_classification=FailureClassification(
+                                category=FailureCategory.STORAGE_FAILURE,
+                                culprit="system",
+                                evidence=f"Pre-match {label} integrity check failed: {msg}",
+                            ),
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+            except Exception as e:
                 return MatchResult(
                     match_id=spec.match_id,
                     outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
                     failure_classification=FailureClassification(
                         category=FailureCategory.STORAGE_FAILURE,
                         culprit="system",
-                        evidence=f"Pre-match Bot A integrity check failed: {msg_a}",
-                    ),
-                    completed_at=datetime.now(timezone.utc).isoformat(),
-                )
-        if (Path(bot_b.source_location) / "manifest.json").exists():
-            ok_b, msg_b = verify_artifact_integrity(bot_b)
-            if not ok_b:
-                return MatchResult(
-                    match_id=spec.match_id,
-                    outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
-                    failure_classification=FailureClassification(
-                        category=FailureCategory.STORAGE_FAILURE,
-                        culprit="system",
-                        evidence=f"Pre-match Bot B integrity check failed: {msg_b}",
+                        evidence=f"Pre-match {label} integrity check exception: {e}",
                     ),
                     completed_at=datetime.now(timezone.utc).isoformat(),
                 )
 
         # Snapshot persistent laboratory state to detect adversarial tampering
         champ_path = get_champion_manifest_path()
-        pre_champ_exists = champ_path.exists()
-        pre_champ_hash = hash_file(champ_path) if pre_champ_exists else None
+        pre_champ_state = get_protected_file_state(champ_path)
+        if pre_champ_state.exists and not pre_champ_state.readable:
+            return MatchResult(
+                match_id=spec.match_id,
+                outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                failure_classification=FailureClassification(
+                    category=FailureCategory.STORAGE_FAILURE,
+                    culprit="system",
+                    evidence=f"Pre-match champion manifest cannot be verified ({champ_path}): {pre_champ_state.error}",
+                ),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
 
         db_path = get_database_path()
         pre_db_state = _snapshot_protected_db_state(db_path, spec.match_id)
 
         art_dir = get_artifacts_dir()
-        pre_art_manifests: dict[str, str | None] = {}
+        pre_art_manifests: dict[str, ProtectedFileState] = {}
         if art_dir.exists():
-            for d in art_dir.iterdir():
-                if d.is_dir():
+            try:
+                dir_entries = list(art_dir.iterdir())
+            except Exception as e:
+                return MatchResult(
+                    match_id=spec.match_id,
+                    outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                    failure_classification=FailureClassification(
+                        category=FailureCategory.STORAGE_FAILURE,
+                        culprit="system",
+                        evidence=f"Pre-match artifact directory cannot be read ({art_dir}): {e}",
+                    ),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+            for d in dir_entries:
+                if d.is_dir() and d.name not in (bot_a.artifact_id, bot_b.artifact_id):
                     m = d / "manifest.json"
-                    pre_art_manifests[d.name] = hash_file(m) if m.exists() else None
+                    m_st = get_protected_file_state(m)
+                    if m_st.exists and not m_st.readable:
+                        return MatchResult(
+                            match_id=spec.match_id,
+                            outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
+                            failure_classification=FailureClassification(
+                                category=FailureCategory.STORAGE_FAILURE,
+                                culprit="system",
+                                evidence=f"Pre-match artifact manifest cannot be verified ({m}): {m_st.error}",
+                            ),
+                            completed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                    pre_art_manifests[d.name] = m_st
 
         # Prepare subprocess instances with memory limit
         env_a = {"BATTLELAB_BOT_POLICY": self._policy_for_bot(bot_a)}
@@ -558,48 +612,73 @@ class MockAdapter(GameAdapter):
         tamper_fc: FailureClassification | None = None
 
         # 1. Champion manifest tampering detection
-        post_champ_exists = champ_path.exists()
-        post_champ_hash = hash_file(champ_path) if post_champ_exists else None
-        if post_champ_exists != pre_champ_exists or post_champ_hash != pre_champ_hash:
+        post_champ_state = get_protected_file_state(champ_path)
+        if not pre_champ_state.matches(post_champ_state):
             tamper_detected = True
+            err_detail = f": {post_champ_state.error}" if post_champ_state.error else ""
             tamper_fc = FailureClassification(
                 category=FailureCategory.STORAGE_FAILURE,
                 culprit="bot_a" if not crashed_a else "bot_b",
-                evidence="Laboratory champion manifest tampering detected during match execution",
+                evidence=f"Laboratory champion manifest tampering detected during match execution{err_detail}",
             )
 
         # 2. Participant artifact integrity detection
-        if not tamper_detected and (Path(bot_a.source_location) / "manifest.json").exists():
-            post_ok_a, post_msg_a = verify_artifact_integrity(bot_a)
-            if not post_ok_a:
-                tamper_detected = True
-                tamper_fc = FailureClassification(
-                    category=FailureCategory.STORAGE_FAILURE,
-                    culprit="bot_a",
-                    evidence=f"Bot A corrupted its artifact snapshot during execution: {post_msg_a}",
-                )
-        if not tamper_detected and (Path(bot_b.source_location) / "manifest.json").exists():
-            post_ok_b, post_msg_b = verify_artifact_integrity(bot_b)
-            if not post_ok_b:
-                tamper_detected = True
-                tamper_fc = FailureClassification(
-                    category=FailureCategory.STORAGE_FAILURE,
-                    culprit="bot_b",
-                    evidence=f"Bot B corrupted its artifact snapshot during execution: {post_msg_b}",
-                )
-
-        # 3. Cross-artifact tampering detection
-        if not tamper_detected and art_dir.exists():
-            for d in art_dir.iterdir():
-                if d.is_dir() and d.name not in (bot_a.artifact_id, bot_b.artifact_id):
-                    m = d / "manifest.json"
-                    post_hash = hash_file(m) if m.exists() else None
-                    if post_hash != pre_art_manifests.get(d.name):
+        for bot_p, culprit, label in ((bot_a, "bot_a", "Bot A"), (bot_b, "bot_b", "Bot B")):
+            if not tamper_detected:
+                try:
+                    m_path = Path(bot_p.source_location) / "manifest.json"
+                    m_st = get_protected_file_state(m_path)
+                    if m_st.exists and not m_st.readable:
                         tamper_detected = True
                         tamper_fc = FailureClassification(
                             category=FailureCategory.STORAGE_FAILURE,
+                            culprit=culprit,
+                            evidence=f"{label} manifest became unreadable during execution: {m_st.error}",
+                        )
+                    elif m_st.exists or bool(getattr(bot_p, "manifest_hash", None)):
+                        post_ok, post_msg = verify_artifact_integrity(bot_p)
+                        if not post_ok:
+                            tamper_detected = True
+                            tamper_fc = FailureClassification(
+                                category=FailureCategory.STORAGE_FAILURE,
+                                culprit=culprit,
+                                evidence=f"{label} corrupted its artifact snapshot during execution: {post_msg}",
+                            )
+                except Exception as e:
+                    tamper_detected = True
+                    tamper_fc = FailureClassification(
+                        category=FailureCategory.STORAGE_FAILURE,
+                        culprit=culprit,
+                        evidence=f"{label} artifact integrity check failed with error: {e}",
+                    )
+
+        # 3. Cross-artifact tampering detection
+        if not tamper_detected and art_dir.exists():
+            try:
+                dir_entries = list(art_dir.iterdir())
+            except Exception as e:
+                tamper_detected = True
+                tamper_fc = FailureClassification(
+                    category=FailureCategory.STORAGE_FAILURE,
+                    culprit="system",
+                    evidence=f"Cross-artifact directory unreadable after match: {e}",
+                )
+                dir_entries = []
+
+            for d in dir_entries:
+                if d.is_dir() and d.name not in (bot_a.artifact_id, bot_b.artifact_id):
+                    m = d / "manifest.json"
+                    pre_st = pre_art_manifests.get(
+                        d.name, ProtectedFileState(exists=False, readable=False)
+                    )
+                    post_st = get_protected_file_state(m)
+                    if not pre_st.matches(post_st):
+                        tamper_detected = True
+                        reason = post_st.error or "content or state changed"
+                        tamper_fc = FailureClassification(
+                            category=FailureCategory.STORAGE_FAILURE,
                             culprit="system",
-                            evidence=f"Cross-artifact tampering detected in artifact: {d.name}",
+                            evidence=f"Cross-artifact tampering detected in artifact: {d.name} ({reason})",
                         )
                         break
 
