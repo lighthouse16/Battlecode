@@ -22,8 +22,10 @@ class ProtectedFileState:
             return True
         if self.exists != other.exists:
             return False
-        if not self.readable or not other.readable:
+        if self.readable != other.readable:
             return False
+        if not self.readable:
+            return True
         return self.sha256 == other.sha256
 
 

@@ -420,19 +420,7 @@ class MockAdapter(GameAdapter):
             for d in dir_entries:
                 if d.is_dir() and d.name not in (bot_a.artifact_id, bot_b.artifact_id):
                     m = d / "manifest.json"
-                    m_st = get_protected_file_state(m)
-                    if m_st.exists and not m_st.readable:
-                        return MatchResult(
-                            match_id=spec.match_id,
-                            outcome=MatchOutcome.INFRASTRUCTURE_FAILURE,
-                            failure_classification=FailureClassification(
-                                category=FailureCategory.STORAGE_FAILURE,
-                                culprit="system",
-                                evidence=f"Pre-match artifact manifest cannot be verified ({m}): {m_st.error}",
-                            ),
-                            completed_at=datetime.now(timezone.utc).isoformat(),
-                        )
-                    pre_art_manifests[d.name] = m_st
+                    pre_art_manifests[d.name] = get_protected_file_state(m)
 
         # Prepare subprocess instances with memory limit
         env_a = {"BATTLELAB_BOT_POLICY": self._policy_for_bot(bot_a)}
