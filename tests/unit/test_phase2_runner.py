@@ -10,6 +10,7 @@ import pytest
 from battlelab.adapters import get_adapter
 from battlelab.bots.artifacts import create_bot_artifact
 from battlelab.bots.process_runner import (
+    BotSubprocess,
     check_memory_limit_support,
     is_process_active,
     terminate_process_tree,
@@ -1468,7 +1469,7 @@ for line in sys.stdin:
 
 
 def test_turn_correlation_delayed_stale_action(tmp_path: Path):
-    """Verify delayed stale action from turn N is rejected on turn N+1."""
+    """Verify delayed stale action from request 1 is rejected on request 2 as PROTOCOL_VIOLATION."""
     bot_file = tmp_path / "delayed_stale_bot.py"
     bot_file.write_text(
         """import sys, json, time, threading
@@ -1476,52 +1477,40 @@ for line in sys.stdin:
     if not line.strip(): continue
     state = json.loads(line)
     req_id = state.get("_battlelab_request_id", 0)
-    # Emit valid action for turn N
-    sys.stdout.write(json.dumps({"type": "CLAIM", "_battlelab_request_id": req_id}) + "\\n")
-    sys.stdout.flush()
-    # In background, wait 20ms then emit duplicate stale action with turn N request ID
     if req_id == 1:
+        # Return valid PASS for request 1 immediately
+        sys.stdout.write(json.dumps({"type": "PASS", "_battlelab_request_id": 1}) + "\\n")
+        sys.stdout.flush()
+        # In background, wait 20ms then emit stale duplicate action with request ID 1
         def delayed():
             time.sleep(0.02)
-            sys.stdout.write(json.dumps({"type": "MOVE", "direction": "UP", "_battlelab_request_id": 1}) + "\\n")
+            sys.stdout.write(json.dumps({"type": "PASS", "_battlelab_request_id": 1}) + "\\n")
             sys.stdout.flush()
         threading.Thread(target=delayed, daemon=True).start()
+    elif req_id == 2:
+        # Deliberately delay legitimate response so stale ID 1 arrives first
+        time.sleep(0.15)
+        sys.stdout.write(json.dumps({"type": "PASS", "_battlelab_request_id": 2}) + "\\n")
+        sys.stdout.flush()
 """,
         encoding="utf-8",
     )
-    bot_b_file = tmp_path / "pass_bot_b.py"
-    bot_b_file.write_text(
-        """import sys, json
-for line in sys.stdin:
-    if not line.strip(): continue
-    state = json.loads(line)
-    if state.get("event") == "SHUTDOWN": break
-    act = {"type": "PASS"}
-    req_id = state.get("_battlelab_request_id")
-    if req_id is not None:
-        act["_battlelab_request_id"] = req_id
-    sys.stdout.write(json.dumps(act) + "\\n")
-    sys.stdout.flush()
-""",
-        encoding="utf-8",
-    )
-    art = create_bot_artifact(bot_file, display_name="DelayedStaleBot")
-    bot_b = create_bot_artifact(bot_b_file, display_name="PassBotB")
-    mock = get_adapter("mock")
-    spec = MatchSpec(
-        match_id="m_delayed_stale",
-        adapter_name="mock",
-        adapter_version=mock.version,
-        bot_a_id=art.artifact_id,
-        bot_b_id=bot_b.artifact_id,
-        map_name="grid_tiny_4x4",
-        seed=1,
-    )
-    res = mock.run_local_match(spec, art, bot_b, tmp_path / "work_stale")
-    assert res.outcome == MatchOutcome.WIN_B
-    assert res.failure_classification is not None
-    assert res.failure_classification.category == FailureCategory.PROTOCOL_VIOLATION
-    assert res.protocol_violation_a is True
+    runner = BotSubprocess(entrypoint_path=bot_file, cwd=tmp_path)
+    runner.start()
+    try:
+        # Request 1: returns immediately with request ID 1
+        act1, status1 = runner.send_turn({"turn": 1}, timeout_seconds=2.0)
+        assert act1 == {"type": "PASS"}
+        assert status1["protocol_violation"] is False
+
+        # Request 2: bot delays legitimate response by 150ms; stale ID 1 arrives in ~20ms
+        act2, status2 = runner.send_turn({"turn": 2}, timeout_seconds=2.0)
+        assert act2 is None
+        assert status2["protocol_violation"] is True
+        assert "mismatch" in status2["reason"].lower()
+        assert runner.protocol_violation is True
+    finally:
+        runner.stop()
 
 
 def test_turn_correlation_multi_turn_success_zero_delay(tmp_path: Path):

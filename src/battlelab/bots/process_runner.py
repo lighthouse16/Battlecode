@@ -214,7 +214,7 @@ SAFE_ENV_ALLOWLIST = {
 
 MOCK_PYTHON_CODE_BOUNDARY: str = "IMMUTABLE_ARTIFACT + PYTHON_STDLIB"
 
-if platform.system() == "Windows":
+if sys.platform == "win32":
     import ctypes
     from ctypes import wintypes
 
@@ -517,7 +517,7 @@ class BotSubprocess:
         self.is_alive = False
         if self.proc is not None:
             proc_handle = getattr(self.proc, "_handle", None)
-            if proc_handle and platform.system() == "Windows":
+            if proc_handle and sys.platform == "win32":
                 try:
                     kernel32.TerminateProcess(int(proc_handle), 1)
                 except Exception:
@@ -542,10 +542,9 @@ class BotSubprocess:
     def start(self) -> None:
         """Launch the bot in an unbuffered subprocess with isolated python and process containment."""
         extra_kwargs: dict[str, Any] = {}
-        job_obj: WindowsJobObject | None = None
-        if platform.system() == "Windows":
+        if sys.platform == "win32":
             try:
-                job_obj = WindowsJobObject()
+                job_obj: WindowsJobObject | None = WindowsJobObject()
             except Exception as e:
                 raise BotStartupError(f"Windows Job Object creation failed: {e}") from e
 
@@ -554,6 +553,7 @@ class BotSubprocess:
             )
             extra_kwargs["creationflags"] = creationflags
         else:
+            job_obj = None
             extra_kwargs["start_new_session"] = True
 
         # Construct isolated python launch command
@@ -611,11 +611,11 @@ class BotSubprocess:
                 **extra_kwargs,
             )
         except Exception as e:
-            if job_obj is not None:
+            if sys.platform == "win32" and job_obj is not None:
                 job_obj.close()
             raise BotStartupError(f"Failed to spawn bot process: {e}") from e
 
-        if platform.system() == "Windows":
+        if sys.platform == "win32":
             assert job_obj is not None
             self._job_object = job_obj
             proc_handle = getattr(self.proc, "_handle", None)
