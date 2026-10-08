@@ -40,6 +40,22 @@ Stop immediately and request operator review ONLY when:
 
 ---
 
+## PHASE 0 — WORKSPACE SETUP
+
+Activate an isolated season competition workspace to ensure official season artifacts, database records, and active champion manifest are strictly separated from pre-season mock state and tracked defaults.
+
+### Command
+```pwsh
+python scripts/competition_workspace.py --season autumn2026
+```
+This automatically sets and persists `BATTLELAB_DATA_DIR` and `BATTLELAB_CHAMPION_MANIFEST` in `.env`.
+To verify active workspace:
+```pwsh
+python scripts/competition_workspace.py --status
+```
+
+---
+
 ## PHASE A — INGEST
 
 Capture, isolate, and inventory authoritative official competition materials into a content-addressed source bundle.

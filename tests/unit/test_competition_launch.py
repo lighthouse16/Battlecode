@@ -745,3 +745,203 @@ def test_champion_init_single_writer_lock_prevents_race(tmp_path: Path, monkeypa
 
     # Lock file is preserved as evidence and not forcibly deleted by failing caller
     assert lock_path.exists()
+
+
+def test_champion_init_blocks_on_legacy_tracked_manifest(capsys, monkeypatch):
+    """Verify champion init strictly rejects initializing into tracked legacy manifest."""
+    root = get_project_root()
+    legacy_manifest = root / "bots" / "champion" / "champion_manifest.json"
+    assert legacy_manifest.exists()
+    original_content = legacy_manifest.read_text(encoding="utf-8")
+
+    # Point directly to the legacy tracked manifest
+    monkeypatch.setenv("BATTLELAB_CHAMPION_MANIFEST", str(legacy_manifest))
+
+    ret = cli_main(
+        [
+            "champion",
+            "init",
+            "art_dummy",
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret == 1
+    err = capsys.readouterr().err
+    assert "Cannot initialize official Champion v0 into tracked repository default manifest" in err
+    # Confirm legacy manifest was never modified
+    assert legacy_manifest.read_text(encoding="utf-8") == original_content
+
+
+def test_season_isolated_workspace_lifecycle_and_co_scoping(tmp_path: Path, monkeypatch, capsys):
+    """Verify season workspace co-scopes manifest and DB, registering Champion v0 without touching legacy files."""
+    root = get_project_root()
+    legacy_manifest = root / "bots" / "champion" / "champion_manifest.json"
+    original_legacy_content = legacy_manifest.read_text(encoding="utf-8")
+
+    # Set season workspace data directory; leave BATTLELAB_CHAMPION_MANIFEST and BATTLELAB_DATABASE_PATH unset
+    season_data_dir = tmp_path / "data" / "competition" / "autumn2026"
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(season_data_dir))
+    monkeypatch.delenv("BATTLELAB_CHAMPION_MANIFEST", raising=False)
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+
+    # Verify automatic co-scoping
+    expected_champ_path = season_data_dir / "champion_manifest.json"
+    assert get_champion_manifest_path().resolve() == expected_champ_path.resolve()
+    assert not expected_champ_path.exists()
+
+    # Register candidate bot into the isolated workspace
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Champion_Autumn2026_v0",
+            "--tags",
+            "season:autumn2026,baseline",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    # Initialize Champion v0
+    ret_init = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Official Autumn 2026 Champion v0",
+            "--actor",
+            "lead_researcher",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret_init == 0
+    init_out = capsys.readouterr().out
+    assert "Successfully INITIALIZED Champion v0" in init_out
+    assert art_id in init_out
+
+    # Verify isolated champion manifest was created
+    assert expected_champ_path.exists()
+    champ_data = json.loads(expected_champ_path.read_text(encoding="utf-8"))
+    assert champ_data["champion_artifact_id"] == art_id
+
+    # Verify isolated database recorded the promotion
+    db = Database(season_data_dir / "battlelab.db")
+    proms = db.list_promotions()
+    assert len(proms) == 1
+    assert proms[0]["artifact_id"] == art_id
+    assert proms[0]["promoted_by"] == "lead_researcher"
+
+    # Crucial acceptance check: legacy repo manifest was NEVER modified
+    assert legacy_manifest.read_text(encoding="utf-8") == original_legacy_content
+
+
+def test_session_re_entry_and_cli_status_reporting(tmp_path: Path, monkeypatch, capsys):
+    """Verify session re-entry uses the same workspace, and champion/competition status report the official champion."""
+    root = get_project_root()
+    legacy_manifest = root / "bots" / "champion" / "champion_manifest.json"
+    original_legacy_content = legacy_manifest.read_text(encoding="utf-8")
+
+    season_data_dir = tmp_path / "data" / "competition" / "autumn2026"
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(season_data_dir))
+    monkeypatch.setenv(
+        "BATTLELAB_CHAMPION_MANIFEST", str(season_data_dir / "champion_manifest.json")
+    )
+
+    # Register and initialize
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Official_Champ_v0",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    ret_init = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Autumn 2026 baseline Champion v0",
+            "--actor",
+            "lead_researcher",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret_init == 0
+    capsys.readouterr()
+
+    # Simulated new session/shell: re-enter with the same workspace env
+    ret_champ_status = cli_main(["champion", "status"])
+    assert ret_champ_status == 0
+    champ_out = capsys.readouterr().out
+    assert art_id in champ_out
+    assert "Official_Champ_v0" in champ_out
+
+    # Check competition status
+    ret_comp_status = cli_main(["competition", "status", "--json"])
+    assert ret_comp_status == 0
+    stat_json = json.loads(capsys.readouterr().out)
+    assert stat_json["authoritative"]["champion"]["active"] is True
+    assert stat_json["authoritative"]["champion"]["artifact_id"] == art_id
+    assert stat_json["authoritative"]["workspace"]["data_dir"] == str(season_data_dir)
+    assert stat_json["authoritative"]["workspace"]["champion_manifest"] == str(
+        season_data_dir / "champion_manifest.json"
+    )
+
+    # Legacy manifest remains completely untouched
+    assert legacy_manifest.read_text(encoding="utf-8") == original_legacy_content
+
+
+def test_scripts_competition_workspace_helper(tmp_path: Path, monkeypatch, capsys):
+    """Verify scripts/competition_workspace.py correctly initializes workspace and checks status."""
+    import importlib.util
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    assert ws_script.exists()
+
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # Test status before isolation
+    monkeypatch.delenv("BATTLELAB_DATA_DIR", raising=False)
+    monkeypatch.delenv("BATTLELAB_CHAMPION_MANIFEST", raising=False)
+    status_uniso = mod.check_workspace_status("autumn2026")
+    assert status_uniso["is_isolated"] is False
+
+    # Test init_workspace without dotenv writing
+    info = mod.init_workspace("test_season_2026", write_dotenv=False)
+    assert "test_season_2026" in info["workspace_dir"]
+    assert "champion_manifest.json" in info["champion_manifest"]
+
+    # Test status after initialization
+    status_iso = mod.check_workspace_status("test_season_2026")
+    assert status_iso["is_isolated"] is True
+
+    # Test CLI --status
+    ret_cli_stat = mod.main(["--status"])
+    assert ret_cli_stat == 0
+    out = capsys.readouterr().out
+    assert "BATTLELAB COMPETITION WORKSPACE STATUS:" in out
+    assert "Isolated Workspace:      YES" in out

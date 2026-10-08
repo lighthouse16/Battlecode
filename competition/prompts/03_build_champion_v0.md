@@ -23,6 +23,13 @@ The goal is **first valid, deterministic, full-match-completing bot**.
 
 ## EXECUTION STEPS
 
+0. **Verify Season-Isolated Competition Workspace**:
+   - Ensure the session runs within the season workspace:
+     `pwsh
+     python scripts/competition_workspace.py --status
+     `
+   - If not isolated, activate: python scripts/competition_workspace.py --season autumn2026.
+
 1. **Implement Baseline Bot Source**:
    - Write simple bot code in the target language (e.g., `bots/autumn2026/champion_v0/`).
    - Obey official communication protocol and response format.

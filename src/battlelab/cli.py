@@ -387,6 +387,17 @@ def cmd_champion(args: argparse.Namespace) -> int:
 
     elif args.action == "init":
         manifest_path = get_champion_manifest_path()
+        legacy_manifest_path = get_project_root() / "bots" / "champion" / "champion_manifest.json"
+        if manifest_path.resolve() == legacy_manifest_path.resolve():
+            print(
+                "Error: Cannot initialize official Champion v0 into tracked repository default manifest "
+                f"({legacy_manifest_path}). An isolated season competition workspace is required. "
+                "Activate a workspace via 'python scripts/competition_workspace.py' or set BATTLELAB_DATA_DIR "
+                "and BATTLELAB_CHAMPION_MANIFEST.",
+                file=sys.stderr,
+            )
+            return 1
+
         if manifest_path.exists():
             current_champ = registry.get_champion_artifact()
             if current_champ is not None:
@@ -837,6 +848,10 @@ def cmd_competition(args: argparse.Namespace) -> int:
             "operator_decisions": state.get("operator_decisions", {}),
             "submission_controls": state.get("submission_controls", {}),
             "authoritative": {
+                "workspace": {
+                    "data_dir": str(get_data_dir()),
+                    "champion_manifest": str(get_champion_manifest_path()),
+                },
                 "official_readiness": {
                     "ready": report.ready,
                     "can_run_local": report.can_run_local,
@@ -870,6 +885,8 @@ def cmd_competition(args: argparse.Namespace) -> int:
         print(f"  Reported Next Action: {wf.get('next_action', 'None')}")
         print("-" * 65)
         print("AUTHORITATIVE SUBSYSTEM READINESS (System-verified):")
+        print(f"  Active Data Dir:        {get_data_dir()}")
+        print(f"  Champion Manifest:      {get_champion_manifest_path()}")
         off = status_data["authoritative"]["official_readiness"]
         print(f"  Official Integration:   {'READY' if off['ready'] else 'NOT READY'}")
         print(f"  Official Can Run Local: {'YES' if off['can_run_local'] else 'NO'}")
