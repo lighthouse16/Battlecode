@@ -32,10 +32,11 @@ Ingest authoritative competition materials, verify inventory integrity via SHA-2
      ```pwsh
      python -m battlelab official spec init --source-bundle <BUNDLE_HASH> --output configs/game_spec.yaml
      ```
-   - For every rule in `configs/game_spec.yaml`, populate `meaning`, citations (`<relpath>#<fragment>`), and `verification_state`:
-     - `verification_state: VERIFIED` — with verified meaning and official citation.
-     - `verification_state: UNKNOWN` — with `meaning: null` and empty `source_refs: []`.
-     - `verification_state: CONFLICTING` — if two official sources contradict each other.
+   - For every rule in `configs/game_spec.yaml`, populate `meaning`, citations (`<relpath>#<fragment>`), and `verification_state` using canonical `RuleVerificationState` values:
+     - `verification_state: DOCUMENTED` — with verified `meaning` and official citation `source_refs: ["<relpath>#<fragment>"]`.
+     - `verification_state: TEST_VERIFIED` — with `meaning`, `source_refs`, and valid repository pytest node ID in `test_coverage: ["tests/...::test_..."]`.
+     - `verification_state: MISSING` — when the rule is undocumented, unverified, or conflicting (`source_refs: []`).
+   - Track human-facing unknowns, ambiguities, or contradictions (`UNKNOWN`, `CONFLICTING`) in `competition/COMPETITION_STATE.yaml` under `operator_decisions.unresolved` and in the final operator report, never as invalid enum values in `configs/game_spec.yaml`.
    - Validate spec:
      ```pwsh
      python -m battlelab official spec validate configs/game_spec.yaml

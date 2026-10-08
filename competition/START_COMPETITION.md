@@ -148,9 +148,9 @@ Build the simplest robust legal bot. Objective is zero failures, not high Elo.
 - Clean immutable artifact created and registered in Battlelab:
   ```pwsh
   python -m battlelab bot register bots/autumn2026/champion_v0/ --name "Champion_v0" --tags "policy:baseline,version:v0"
-  python -m battlelab champion set <artifact_id> --reason "Initial baseline Champion v0"
+  python -m battlelab champion init <artifact_id> --reason "Initial baseline Champion v0" --actor "<operator_name>"
   ```
-- Candidate state marked `READY_FOR_SUBMISSION`.
+- Workflow state marked `CHAMPION_V0_PROMOTED`.
 
 ### Automation Prompt
 `competition/prompts/03_build_champion_v0.md`

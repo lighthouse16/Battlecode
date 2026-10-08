@@ -1,7 +1,7 @@
 # Prompt 04: Strategy Research Loop
 
 Use this prompt to execute iterative, hypothesis-driven bot development.
-Starts only after Champion v0 is active and `research.status: READY`.
+Starts only after Champion v0 is active in `battlelab champion status` and baseline matches succeed.
 
 ---
 

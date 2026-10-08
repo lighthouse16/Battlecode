@@ -12,8 +12,9 @@ Configure and verify Battlelab's official competition adapter subsystem against 
 
 ## PREREQUISITES
 
-- `competition/COMPETITION_STATE.yaml` shows `competition.status: MATERIALS_INGESTED`.
-- Build command, match command, runtime, and entrypoint are `VERIFIED` in game spec.
+- `competition/COMPETITION_STATE.yaml` shows `workflow.status: MATERIALS_INGESTED`.
+- Official materials ingested with valid bundle hash (`python -m battlelab official status`).
+- Build command, match command, runtime, and entrypoint rules populated in `configs/game_spec.yaml` with valid structure (`python -m battlelab official spec validate configs/game_spec.yaml`).
 
 ---
 

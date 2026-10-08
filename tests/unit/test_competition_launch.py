@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -17,7 +18,12 @@ import yaml
 from battlelab.cli import main as cli_main
 from battlelab.official.models import GameSpec
 from battlelab.official.sources import ingest_sources, load_source_bundle_manifest
-from battlelab.official.spec import REQUIRED_RULE_SECTIONS, init_game_spec, load_and_validate_spec
+from battlelab.official.spec import (
+    REQUIRED_RULE_SECTIONS,
+    init_game_spec,
+    load_and_validate_spec,
+    validate_game_spec,
+)
 from battlelab.storage.paths import get_project_root
 from scripts.bootstrap_competition import bootstrap_competition
 from scripts.bootstrap_competition import main as bootstrap_main
@@ -146,7 +152,7 @@ def test_cli_competition_status_authoritative_vs_tampered_state(capsys, tmp_path
     ret = cli_main(["competition", "status"])
     assert ret == 0
     captured = capsys.readouterr().out
-    assert "Workflow Phase:" in captured
+    assert "OPERATIONAL WORKFLOW PROGRESS" in captured
     assert "Official Integration:   NOT READY" in captured
     assert "Official Adapter:       NOT READY" in captured
     assert "Active Blockers" in captured
@@ -179,12 +185,188 @@ def test_cli_competition_status_authoritative_vs_tampered_state(capsys, tmp_path
     tampered_file.parent.mkdir(parents=True, exist_ok=True)
     tampered_file.write_text(yaml.safe_dump(tampered_state), encoding="utf-8")
 
-    with patch("battlelab.storage.paths.get_project_root", return_value=tmp_path):
-        # Even with tampered YAML, the authoritative subsystem must report NOT READY
-        cli_main(["competition", "status"])
+    # Patch battlelab.cli.get_project_root to ensure CLI loads the tampered file
+    with patch("battlelab.cli.get_project_root", return_value=tmp_path):
+        ret_tampered = cli_main(["competition", "status"])
+        assert ret_tampered == 0
         out = capsys.readouterr().out
+        # Verify untrusted operator progress text was indeed loaded from tampered YAML
+        assert "PHASE_E_SUBMISSION" in out
+        assert "READY_FOR_SUBMISSION" in out
+        # Crucially: authoritative subsystem remains strictly NOT READY
         assert "Official Integration:   NOT READY" in out
         assert "Official Adapter:       NOT READY" in out
+
+        # JSON mode confirms tampered workflow alongside authoritative NOT READY
+        ret_tampered_json = cli_main(["competition", "status", "--json"])
+        assert ret_tampered_json == 0
+        t_data = json.loads(capsys.readouterr().out)
+        assert t_data["workflow"]["current_phase"] == "PHASE_E_SUBMISSION"
+        assert t_data["workflow"]["status"] == "READY_FOR_SUBMISSION"
+        assert t_data["authoritative"]["official_readiness"]["ready"] is False
+        assert t_data["authoritative"]["adapter"]["can_run_local"] is False
+
+
+def test_champion_init_governance(tmp_path: Path, monkeypatch, capsys):
+    """Verify safe Champion v0 initialization flow via CLI."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+
+    # Register candidate bot
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Champion_v0",
+            "--tags",
+            "policy:baseline,version:v0",
+        ]
+    )
+    assert ret_reg == 0
+    reg_out = capsys.readouterr().out
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", reg_out)
+    assert match is not None
+    art_id = match.group(1)
+
+    # Reject missing/invalid artifact ID
+    ret_no_art = cli_main(
+        [
+            "champion",
+            "init",
+            "art_missing",
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+        ]
+    )
+    assert ret_no_art == 1
+    assert "Artifact not found" in capsys.readouterr().err
+
+    # Reject generic actor
+    for generic in ["human", "default", "unknown", "system", "root"]:
+        ret_gen = cli_main(
+            [
+                "champion",
+                "init",
+                art_id,
+                "--reason",
+                "Initial baseline Champion v0",
+                "--actor",
+                generic,
+            ]
+        )
+        assert ret_gen == 1
+        assert "explicit, named non-generic actor" in capsys.readouterr().err
+
+    # Reject short reason (< 10 chars)
+    ret_short = cli_main(
+        ["champion", "init", art_id, "--reason", "short", "--actor", "operator_alice"]
+    )
+    assert ret_short == 1
+    assert "explicit reason" in capsys.readouterr().err
+
+    # Successful Champion v0 initialization
+    ret_init = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+        ]
+    )
+    assert ret_init == 0
+    init_out = capsys.readouterr().out
+    assert "Successfully INITIALIZED Champion v0" in init_out
+    assert art_id in init_out
+
+    # Verify champion is now active
+    ret_stat = cli_main(["champion", "status"])
+    assert ret_stat == 0
+    stat_out = capsys.readouterr().out
+    assert art_id in stat_out
+
+    # Second champion init must fail closed (already initialized)
+    ret_reinit = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Attempt duplicate init",
+            "--actor",
+            "operator_alice",
+        ]
+    )
+    assert ret_reinit == 1
+    assert "Champion is already initialized" in capsys.readouterr().err
+
+
+def test_prompt01_rule_verification_states_against_validator(tmp_path: Path):
+    """Verify Prompt 01 rule specification conforms to canonical validator and rejects invalid states."""
+    src_dir = tmp_path / "materials"
+    src_dir.mkdir()
+    (src_dir / "rules.md").write_text("# Official Rules\nScoring and turns.", encoding="utf-8")
+    bundles_dir = tmp_path / "bundles"
+    manifest = bootstrap_competition(src_dir, bundles_dir=bundles_dir)
+    bundle_hash = manifest["bundle_hash"]
+    doc_hash = manifest["files"][0]["sha256"]
+
+    # Valid spec matching Prompt 01 instructions
+    rules: dict[str, Any] = {}
+    for sec in REQUIRED_RULE_SECTIONS:
+        rules[sec] = {
+            "meaning": f"Rule specification for {sec}",
+            "source_refs": [],
+            "verification_state": "MISSING",
+            "implementation_impacts": [],
+            "test_coverage": [],
+            "notes": "",
+        }
+
+    # Document one rule with valid citation
+    sec_name = "victory_loss_draw_tiebreak"
+    rules[sec_name]["verification_state"] = "DOCUMENTED"
+    rules[sec_name]["meaning"] = "Win by destroying opponent base"
+    rules[sec_name]["source_refs"] = ["rules.md#scoring"]
+
+    valid_spec = {
+        "schema_version": "1.0.0",
+        "competition_name": "Battlecode",
+        "competition_season": "Autumn2026",
+        "spec_version": "1.0.0",
+        "source_bundle_hash": bundle_hash,
+        "official_document_hashes": [doc_hash],
+        "sdk_version": "1.0.0",
+        "rules": rules,
+    }
+
+    is_valid, errors, spec_obj, _ = validate_game_spec(
+        valid_spec, bundles_dir=bundles_dir, project_root=get_project_root()
+    )
+    assert is_valid is True
+    assert errors == []
+    assert spec_obj is not None
+
+    # Verify invalid non-canonical states (e.g. from old Prompt 01) are strictly rejected
+    for invalid_state in ["VERIFIED", "UNKNOWN", "CONFLICTING"]:
+        invalid_spec = dict(valid_spec)
+        invalid_rules = dict(rules)
+        invalid_rules[sec_name] = dict(rules[sec_name])
+        invalid_rules[sec_name]["verification_state"] = invalid_state
+        invalid_spec["rules"] = invalid_rules
+
+        inv_valid, inv_errors, _, _ = validate_game_spec(
+            invalid_spec, bundles_dir=bundles_dir, project_root=get_project_root()
+        )
+        assert inv_valid is False
+        assert any("invalid state" in e and invalid_state in e for e in inv_errors)
 
 
 def test_competition_state_and_templates_integrity():

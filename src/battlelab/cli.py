@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -382,6 +384,85 @@ def cmd_champion(args: argparse.Namespace) -> int:
         print(f"  Created At:      {champ.created_at}")
         return 0
 
+    elif args.action == "init":
+        current_champ = registry.get_champion_artifact()
+        if current_champ is not None:
+            print(
+                f"Error: Champion is already initialized (current: {current_champ.artifact_id}). "
+                "Use 'battlelab experiment promote' or 'battlelab champion rollback'.",
+                file=sys.stderr,
+            )
+            return 1
+
+        try:
+            art = registry.get_artifact(args.artifact_id)
+        except Exception:
+            art = None
+        if not art:
+            print(f"Error: Artifact not found: {args.artifact_id}", file=sys.stderr)
+            return 1
+
+        from battlelab.bots.artifacts import verify_artifact_integrity
+
+        ok, err = verify_artifact_integrity(art)
+        if not ok:
+            print(f"Error: Artifact integrity check failed: {err}", file=sys.stderr)
+            return 1
+
+        actor = getattr(args, "actor", "")
+        if (
+            not actor
+            or not actor.strip()
+            or actor.strip().lower() in ("human", "default", "unknown", "system", "root")
+        ):
+            print(
+                "Error: Initializing champion requires an explicit, named non-generic actor (e.g. researcher username).",
+                file=sys.stderr,
+            )
+            return 1
+
+        reason = getattr(args, "reason", "")
+        if not reason or len(reason.strip()) < 10:
+            print(
+                "Error: Initializing champion requires an explicit reason (>= 10 characters).",
+                file=sys.stderr,
+            )
+            return 1
+
+        clean_actor = actor.strip()
+        clean_reason = reason.strip()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        init_reason = f"Initial Champion v0: {clean_reason}"
+
+        manifest = registry.update_champion_manifest(
+            artifact_id=art.artifact_id,
+            experiment_id=None,
+            updated_at=now_iso,
+            reason=init_reason,
+            previous_champion_id=None,
+        )
+
+        promotion_id = (
+            f"prom_init_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
+        )
+        db.save_promotion(
+            promotion_id=promotion_id,
+            experiment_id=None,
+            artifact_id=art.artifact_id,
+            promoted_at=now_iso,
+            manifest_snapshot=manifest,
+            reason=init_reason,
+            mode="INITIAL_CHAMPION_V0",
+            promoted_by=clean_actor,
+            previous_champion_id=None,
+            artifact_manifest_hash=art.manifest_hash,
+        )
+
+        print(f"Successfully INITIALIZED Champion v0 to {art.artifact_id} ({art.display_name})")
+        print(f"  Promoted By: {clean_actor}")
+        print(f"  Audit ID:    {promotion_id}")
+        return 0
+
     elif args.action == "rollback":
         reason = getattr(args, "reason", "")
         actor = getattr(args, "actor", "")
@@ -651,37 +732,38 @@ def cmd_competition(args: argparse.Namespace) -> int:
             return 0
 
         print("=" * 65)
-        print("BATTLELAB COMPETITION OPERATIONAL STATUS")
+        print("BATTLELAB COMPETITION STATUS")
         print("=" * 65)
         wf = status_data["workflow"]
-        print(f"Workflow Phase:         {wf.get('current_phase', 'UNKNOWN')}")
-        print(f"Workflow Status:        {wf.get('status', 'UNKNOWN')}")
-        print(f"Next Action:            {wf.get('next_action', 'None')}")
+        print("OPERATIONAL WORKFLOW PROGRESS (Operator-reported, Untrusted):")
+        print(f"  Reported Phase:       {wf.get('current_phase', 'UNKNOWN')}")
+        print(f"  Reported Status:      {wf.get('status', 'UNKNOWN')}")
+        print(f"  Reported Next Action: {wf.get('next_action', 'None')}")
         print("-" * 65)
-        print("AUTHORITATIVE SUBSYSTEMS:")
+        print("AUTHORITATIVE SUBSYSTEM READINESS (System-verified):")
         off = status_data["authoritative"]["official_readiness"]
-        print(f"Official Integration:   {'READY' if off['ready'] else 'NOT READY'}")
-        print(f"Official Can Run Local: {'YES' if off['can_run_local'] else 'NO'}")
-        print(f"Official Can Submit:    {'YES' if off['can_submit'] else 'NO'}")
-        print(f"Source Bundle Hash:     {off['source_bundle_hash'] or 'None'}")
-        print(f"Game Spec Hash:         {off['spec_hash'] or 'None'}")
-        print(f"Official SDK Version:   {off['sdk_version'] or 'Unreleased'}")
+        print(f"  Official Integration:   {'READY' if off['ready'] else 'NOT READY'}")
+        print(f"  Official Can Run Local: {'YES' if off['can_run_local'] else 'NO'}")
+        print(f"  Official Can Submit:    {'YES' if off['can_submit'] else 'NO'}")
+        print(f"  Source Bundle Hash:     {off['source_bundle_hash'] or 'None'}")
+        print(f"  Game Spec Hash:         {off['spec_hash'] or 'None'}")
+        print(f"  Official SDK Version:   {off['sdk_version'] or 'Unreleased'}")
         if off["blockers"]:
-            print(f"Active Blockers ({len(off['blockers'])}):")
+            print(f"  Active Blockers ({len(off['blockers'])}):")
             for b in off["blockers"][:5]:
-                print(f"  - {b}")
+                print(f"    - {b}")
             if len(off["blockers"]) > 5:
-                print(f"  ... and {len(off['blockers']) - 5} more.")
+                print(f"    ... and {len(off['blockers']) - 5} more.")
 
         adp = status_data["authoritative"]["adapter"]
         adp_ready_str = (
             "READY" if (adp.get("can_run_local") and not adp.get("error")) else "NOT READY"
         )
-        print(f"Official Adapter:       {adp_ready_str} (name: {adp['name']})")
+        print(f"  Official Adapter:       {adp_ready_str} (name: {adp['name']})")
 
         champ_info = status_data["authoritative"]["champion"]
         champ_str = f"ACTIVE ({champ_info['artifact_id']})" if champ_info["active"] else "NONE"
-        print(f"Champion Artifact:      {champ_str}")
+        print(f"  Champion Artifact:      {champ_str}")
 
         sub = status_data["submission_controls"]
         approval = (
@@ -689,7 +771,7 @@ def cmd_competition(args: argparse.Namespace) -> int:
             if sub.get("operator_approval_required", True)
             else "DISALLOWED (must be required)"
         )
-        print(f"Submission Approval:    {approval}")
+        print(f"  Submission Approval:    {approval}")
         print("=" * 65)
         return 0
 
@@ -803,6 +885,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_champ = subparsers.add_parser("champion", help="Champion operations and rollback")
     p_champ_sub = p_champ.add_subparsers(dest="action", required=True)
     p_champ_sub.add_parser("status", help="View active champion")
+    p_champ_init = p_champ_sub.add_parser(
+        "init", help="Initialize Champion v0 when no champion exists"
+    )
+    p_champ_init.add_argument("artifact_id", help="Candidate baseline artifact ID")
+    p_champ_init.add_argument(
+        "--reason", required=True, help="Explicit meaningful reason for initialization"
+    )
+    p_champ_init.add_argument(
+        "--actor", required=True, help="Explicit named identity of actor initializing champion"
+    )
     p_champ_rb = p_champ_sub.add_parser(
         "rollback", help="Roll back champion to a historical artifact"
     )

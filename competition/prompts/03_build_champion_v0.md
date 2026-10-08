@@ -44,9 +44,13 @@ The goal is **first valid, deterministic, full-match-completing bot**.
      - Measure runtime headroom: average and maximum turn latency must remain well below official per-turn limits.
 
 4. **Register as Initial Champion**:
-   - Promote artifact as initial Champion v0 in Battlelab:
+   - Register artifact as initial Champion v0 in Battlelab (allowed only when no champion is currently active):
      ```pwsh
-     python -m battlelab champion set <artifact_id> --reason "Initial baseline Champion v0"
+     python -m battlelab champion init <artifact_id> --reason "Initial baseline Champion v0" --actor "<operator_name>"
+     ```
+   - Verify champion registration:
+     ```pwsh
+     python -m battlelab champion status
      ```
 
 5. **Run Submission Package Pre-Checks**:
