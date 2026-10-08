@@ -11,9 +11,13 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
-def load_dotenv_workspace() -> None:
+def load_dotenv_workspace(env_file_path: Path | None = None) -> None:
     """Load season workspace env overrides from .env if present and not already set in environment."""
-    env_file = get_project_root() / ".env"
+    if env_file_path is not None:
+        env_file = env_file_path
+    else:
+        env_override = os.environ.get("BATTLELAB_ENV_FILE")
+        env_file = Path(env_override) if env_override else get_project_root() / ".env"
     if env_file.is_file():
         try:
             for line in env_file.read_text(encoding="utf-8").splitlines():

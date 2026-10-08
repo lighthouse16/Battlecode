@@ -1137,73 +1137,166 @@ def test_contradictory_env_overrides_fail_closed(monkeypatch):
     monkeypatch.delenv("BATTLELAB_DATA_DIR", raising=False)
     monkeypatch.delenv("BATTLELAB_CHAMPION_MANIFEST", raising=False)
 
-    with pytest.raises(ValueError, match="Contradictory environment overrides detected"):
+    with pytest.raises(ValueError, match="Contradictory|differs from canonical"):
         mod.init_workspace("autumn2026", write_dotenv=False)
 
     # Contradictory data dir pointing to another season
     monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
     monkeypatch.setenv("BATTLELAB_DATA_DIR", "data/competition/spring2026")
-    with pytest.raises(ValueError, match="Contradictory environment overrides detected"):
+    with pytest.raises(ValueError, match="Contradictory|points to a different directory"):
         mod.init_workspace("autumn2026", write_dotenv=False)
 
 
-def test_fresh_subprocess_re_entry_persistence(tmp_path: Path):
-    """Verify fresh OS subprocess correctly reads .env workspace configuration."""
+def test_cross_session_identity_drift_prevented(tmp_path: Path, monkeypatch):
+    """Verify init_workspace and fresh subprocess prevent DB/artifact drift, rejecting unsupported overrides."""
+    import importlib.util
     import json
-    import shutil
+    import subprocess
+    import sys
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    root = get_project_root()
+
+    # 1. Attempt init with nested / alternate DB override -> must fail closed
+    monkeypatch.setenv(
+        "BATTLELAB_DATABASE_PATH",
+        "data/competition/autumn2026/nested/alternate.db",
+    )
+    with pytest.raises(ValueError, match="differs from canonical season database"):
+        mod.init_workspace("autumn2026", write_dotenv=False)
+
+    # 2. Attempt init with legacy artifacts override -> must fail closed
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+    monkeypatch.setenv("BATTLELAB_ARTIFACTS_DIR", "data/artifacts")
+    with pytest.raises(ValueError, match="differs from canonical season artifacts directory"):
+        mod.init_workspace("autumn2026", write_dotenv=False)
+
+    # 3. Clean environment: init writes isolated tmp_env and reports canonical paths
+    monkeypatch.delenv("BATTLELAB_ARTIFACTS_DIR", raising=False)
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("BATTLELAB_DATA_DIR", raising=False)
+    monkeypatch.delenv("BATTLELAB_CHAMPION_MANIFEST", raising=False)
+
+    test_env = tmp_path / "season.env"
+    info = mod.init_workspace("autumn2026", write_dotenv=True, env_file=test_env)
+
+    # Subprocess loading test_env via BATTLELAB_ENV_FILE
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
+    clean_env["BATTLELAB_ENV_FILE"] = str(test_env)
+
+    query_code = (
+        "import json; from battlelab.storage.paths import get_database_path, get_champion_manifest_path, get_artifacts_dir; "
+        "print(json.dumps({'db': str(get_database_path().resolve()), 'manifest': str(get_champion_manifest_path().resolve()), 'artifacts': str(get_artifacts_dir().resolve())}))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", query_code],
+        cwd=root,
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"Subprocess failed: {proc.stderr}"
+    sub_paths = json.loads(proc.stdout)
+
+    # Effective paths must be identical across sessions
+    assert sub_paths["db"] == info["effective_database"]
+    assert sub_paths["manifest"] == info["effective_champion_manifest"]
+    assert sub_paths["artifacts"] == info["effective_artifacts"]
+
+    # No legacy path is used
+    assert (
+        "data\\battlelab.db" not in sub_paths["db"] and "data/battlelab.db" not in sub_paths["db"]
+    )
+    assert "bots\\champion\\champion_manifest.json" not in sub_paths["manifest"]
+    assert "bots/champion/champion_manifest.json" not in sub_paths["manifest"]
+
+
+def test_status_ignores_unrelated_dotenv_keys(tmp_path: Path, monkeypatch):
+    """Verify check_workspace_status ignores differences in unrelated keys (e.g. DATABASE_URL, SECRET_KEY)."""
+    import importlib.util
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    root = get_project_root()
+    test_env = tmp_path / "isolated.env"
+    season = "autumn2026"
+    test_env.write_text(
+        f"BATTLELAB_DATA_DIR=data/competition/{season}\n"
+        f"BATTLELAB_CHAMPION_MANIFEST=data/competition/{season}/champion_manifest.json\n"
+        "DATABASE_URL=postgres://prod_user:secret@db.prod.internal/app\n"
+        "SECRET_KEY=prod_secret_token_12345\n",
+        encoding="utf-8",
+    )
+
+    # In active session, set workspace keys matching .env, but set DIFFERENT values for unrelated keys
+    season_dir = root / "data" / "competition" / season
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(season_dir))
+    monkeypatch.setenv("BATTLELAB_CHAMPION_MANIFEST", str(season_dir / "champion_manifest.json"))
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("BATTLELAB_ARTIFACTS_DIR", raising=False)
+
+    monkeypatch.setenv("DATABASE_URL", "postgres://dev:dev@localhost/local_dev")
+    monkeypatch.setenv("SECRET_KEY", "local_development_secret")
+
+    status = mod.check_workspace_status(season, env_file=test_env)
+    assert status["is_isolated"] is True
+    assert len(status["issues"]) == 0
+
+
+def test_fresh_subprocess_re_entry_persistence(tmp_path: Path):
+    """Verify fresh OS subprocess correctly reads .env workspace configuration without mutating repo root."""
+    import json
     import subprocess
     import sys
 
     root = get_project_root()
-    env_file = root / ".env"
-    existing_env_existed = env_file.exists()
-    saved_content = env_file.read_text(encoding="utf-8") if existing_env_existed else None
-
+    # Write isolated test .env strictly under tmp_path — NEVER in project root
+    test_env = tmp_path / "test.env"
     season = "subproc_test_2026"
     rel_data_dir = f"data/competition/{season}"
     rel_manifest = f"data/competition/{season}/champion_manifest.json"
 
-    try:
-        env_file.write_text(
-            f"BATTLELAB_DATA_DIR={rel_data_dir}\nBATTLELAB_CHAMPION_MANIFEST={rel_manifest}\n",
-            encoding="utf-8",
-        )
+    test_env.write_text(
+        f"BATTLELAB_DATA_DIR={rel_data_dir}\nBATTLELAB_CHAMPION_MANIFEST={rel_manifest}\n",
+        encoding="utf-8",
+    )
 
-        # Launch fresh subprocess running battlelab competition status --json
-        # Strip BATTLELAB_* variables to simulate a fresh terminal session without test harness fixtures
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
-        cmd = [sys.executable, "-m", "battlelab", "competition", "status", "--json"]
-        proc = subprocess.run(
-            cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30
-        )
-        assert proc.returncode == 0, f"Subprocess failed with stderr: {proc.stderr}"
+    # Launch fresh subprocess pointing to isolated test_env via BATTLELAB_ENV_FILE
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
+    clean_env["BATTLELAB_ENV_FILE"] = str(test_env)
 
-        status_data = json.loads(proc.stdout)
-        active_ws = status_data["authoritative"]["workspace"]
-        assert season in active_ws["data_dir"]
-        assert season in active_ws["champion_manifest"]
+    cmd = [sys.executable, "-m", "battlelab", "competition", "status", "--json"]
+    proc = subprocess.run(cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"Subprocess failed with stderr: {proc.stderr}"
 
-        # Run scripts/competition_workspace.py --status in fresh subprocess
-        ws_cmd = [
-            sys.executable,
-            "scripts/competition_workspace.py",
-            "--status",
-            "--season",
-            season,
-        ]
-        ws_proc = subprocess.run(
-            ws_cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30
-        )
-        assert ws_proc.returncode == 0, f"Workspace status failed: {ws_proc.stderr}"
-        assert "Isolated Workspace:      YES" in ws_proc.stdout
+    status_data = json.loads(proc.stdout)
+    active_ws = status_data["authoritative"]["workspace"]
+    assert season in active_ws["data_dir"]
+    assert season in active_ws["champion_manifest"]
 
-    finally:
-        # Restore or clean up .env
-        if existing_env_existed and saved_content is not None:
-            env_file.write_text(saved_content, encoding="utf-8")
-        elif env_file.exists():
-            env_file.unlink(missing_ok=True)
-        # Clean up created test season directory
-        test_season_dir = root / "data" / "competition" / season
-        if test_season_dir.exists():
-            shutil.rmtree(test_season_dir, ignore_errors=True)
+    # Run scripts/competition_workspace.py --status in fresh subprocess
+    ws_cmd = [
+        sys.executable,
+        "scripts/competition_workspace.py",
+        "--status",
+        "--season",
+        season,
+    ]
+    ws_proc = subprocess.run(
+        ws_cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30
+    )
+    assert ws_proc.returncode == 0, f"Workspace status failed: {ws_proc.stderr}"
+    assert "Isolated Workspace:      YES" in ws_proc.stdout
+
+    # Assert repo root .env was NEVER created or modified
+    assert not (root / ".env").exists()

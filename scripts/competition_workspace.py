@@ -24,6 +24,19 @@ from battlelab.storage.paths import (
 
 SEASON_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
+WORKSPACE_ENV_KEYS = {
+    "BATTLELAB_DATA_DIR",
+    "BATTLELAB_CHAMPION_MANIFEST",
+    "BATTLELAB_DATABASE_PATH",
+    "BATTLELAB_ARTIFACTS_DIR",
+}
+
+
+def get_default_env_file() -> Path:
+    """Return canonical path to .env file, respecting BATTLELAB_ENV_FILE override."""
+    custom_env = os.environ.get("BATTLELAB_ENV_FILE")
+    return Path(custom_env) if custom_env else get_project_root() / ".env"
+
 
 def validate_season_slug(season: str) -> str:
     """Validate season is a simple safe slug without traversal, separators, or absolute paths."""
@@ -96,21 +109,32 @@ def init_workspace(
     workspace_dir, manifest_path = get_workspace_paths(season)
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    expected_db = (workspace_dir / "battlelab.db").resolve()
+    expected_artifacts = (workspace_dir / "artifacts").resolve()
+
     rel_dir = f"data/competition/{season}"
     rel_manifest = f"data/competition/{season}/champion_manifest.json"
 
-    # Pre-flight check: detect contradictory environment overrides in caller's environment
+    # Pre-flight check: detect contradictory or unsupported overrides in caller's environment
     conflicts: list[str] = []
     if "BATTLELAB_DATABASE_PATH" in os.environ:
         db_p = Path(os.environ["BATTLELAB_DATABASE_PATH"])
         if not db_p.is_absolute():
             db_p = root / db_p
-        if not (
-            db_p.resolve() == (workspace_dir / "battlelab.db").resolve()
-            or workspace_dir.resolve() in db_p.resolve().parents
-        ):
+        if db_p.resolve() != expected_db:
             conflicts.append(
-                f"BATTLELAB_DATABASE_PATH='{os.environ['BATTLELAB_DATABASE_PATH']}' points outside workspace ({workspace_dir})"
+                f"BATTLELAB_DATABASE_PATH='{os.environ['BATTLELAB_DATABASE_PATH']}' differs from canonical season database ({expected_db}). "
+                "Unset BATTLELAB_DATABASE_PATH to prevent cross-session identity drift."
+            )
+
+    if "BATTLELAB_ARTIFACTS_DIR" in os.environ:
+        art_p = Path(os.environ["BATTLELAB_ARTIFACTS_DIR"])
+        if not art_p.is_absolute():
+            art_p = root / art_p
+        if art_p.resolve() != expected_artifacts:
+            conflicts.append(
+                f"BATTLELAB_ARTIFACTS_DIR='{os.environ['BATTLELAB_ARTIFACTS_DIR']}' differs from canonical season artifacts directory ({expected_artifacts}). "
+                "Unset BATTLELAB_ARTIFACTS_DIR to prevent cross-session identity drift."
             )
 
     if "BATTLELAB_DATA_DIR" in os.environ:
@@ -133,13 +157,12 @@ def init_workspace(
 
     if conflicts:
         raise ValueError(
-            "Contradictory environment overrides detected in active session. "
-            "Unset or correct the following variables before initializing:\n  "
-            + "\n  ".join(conflicts)
+            "Contradictory or unsupported environment overrides detected in active session. "
+            "Remediate the following before initializing:\n  " + "\n  ".join(conflicts)
         )
 
+    target_env = env_file or get_default_env_file()
     if write_dotenv:
-        target_env = env_file or (root / ".env")
         update_dotenv_file(
             env_file=target_env,
             updates={
@@ -153,20 +176,40 @@ def init_workspace(
     os.environ["BATTLELAB_DATA_DIR"] = rel_dir
     os.environ["BATTLELAB_CHAMPION_MANIFEST"] = rel_manifest
 
+    # Remove redundant overrides matching canonical so resolution is uniform across sessions
+    if (
+        "BATTLELAB_DATABASE_PATH" in os.environ
+        and Path(os.environ["BATTLELAB_DATABASE_PATH"]).resolve() == expected_db
+    ):
+        os.environ.pop("BATTLELAB_DATABASE_PATH", None)
+    if (
+        "BATTLELAB_ARTIFACTS_DIR" in os.environ
+        and Path(os.environ["BATTLELAB_ARTIFACTS_DIR"]).resolve() == expected_artifacts
+    ):
+        os.environ.pop("BATTLELAB_ARTIFACTS_DIR", None)
+
     # Report effective paths
     eff_data_dir = get_data_dir().resolve()
     eff_manifest = get_champion_manifest_path().resolve()
     eff_db = get_database_path().resolve()
+    eff_artifacts = get_artifacts_dir().resolve()
+
+    assert eff_data_dir == workspace_dir.resolve()
+    assert eff_manifest == manifest_path.resolve()
+    assert eff_db == expected_db
+    assert eff_artifacts == expected_artifacts
 
     return {
         "workspace_dir": str(workspace_dir),
         "champion_manifest": str(manifest_path),
-        "database_path": str(workspace_dir / "battlelab.db"),
+        "database_path": str(expected_db),
+        "artifacts_dir": str(expected_artifacts),
         "rel_data_dir": rel_dir,
         "rel_champion_manifest": rel_manifest,
         "effective_data_dir": str(eff_data_dir),
         "effective_champion_manifest": str(eff_manifest),
         "effective_database": str(eff_db),
+        "effective_artifacts": str(eff_artifacts),
     }
 
 
@@ -177,12 +220,12 @@ def check_workspace_status(
     season = validate_season_slug(season)
     root = get_project_root()
     expected_workspace_dir, expected_manifest = get_workspace_paths(season)
-    expected_db = expected_workspace_dir / "battlelab.db"
-    expected_artifacts = expected_workspace_dir / "artifacts"
+    expected_db = (expected_workspace_dir / "battlelab.db").resolve()
+    expected_artifacts = (expected_workspace_dir / "artifacts").resolve()
 
-    legacy_manifest = root / "bots" / "champion" / "champion_manifest.json"
-    legacy_data_dir = root / "data"
-    legacy_db = legacy_data_dir / "battlelab.db"
+    legacy_manifest = (root / "bots" / "champion" / "champion_manifest.json").resolve()
+    legacy_data_dir = (root / "data").resolve()
+    legacy_db = (legacy_data_dir / "battlelab.db").resolve()
 
     curr_data_dir = get_data_dir().resolve()
     curr_manifest = get_champion_manifest_path().resolve()
@@ -192,12 +235,10 @@ def check_workspace_status(
     issues: list[str] = []
 
     # Check for legacy default usage
-    is_legacy = (
-        curr_manifest == legacy_manifest.resolve() and curr_data_dir == legacy_data_dir.resolve()
-    )
-    if curr_manifest == legacy_manifest.resolve():
+    is_legacy = curr_manifest == legacy_manifest and curr_data_dir == legacy_data_dir
+    if curr_manifest == legacy_manifest:
         issues.append(f"Champion manifest points to legacy repository manifest: {legacy_manifest}")
-    if curr_data_dir == legacy_data_dir.resolve():
+    if curr_data_dir == legacy_data_dir:
         issues.append(
             f"Data directory points to legacy repository default data dir: {legacy_data_dir}"
         )
@@ -212,29 +253,24 @@ def check_workspace_status(
             f"Active champion manifest ({curr_manifest}) does not match expected season manifest ({expected_manifest.resolve()})"
         )
 
-    # Check database co-scoping
-    if curr_db == legacy_db.resolve() and curr_data_dir != legacy_data_dir.resolve():
+    # Check database co-scoping & canonical identity
+    if curr_db == legacy_db and curr_data_dir != legacy_data_dir:
         issues.append(
             f"Database ({curr_db}) is split: pointing to legacy repository database while data dir is isolated."
         )
-    elif not (
-        curr_db == expected_db.resolve() or expected_workspace_dir.resolve() in curr_db.parents
-    ):
+    elif curr_db != expected_db:
         issues.append(
-            f"Database ({curr_db}) does not reside within season workspace ({expected_workspace_dir.resolve()})"
+            f"Database ({curr_db}) differs from canonical season database ({expected_db})."
         )
 
-    # Check artifacts co-scoping
-    if not (
-        curr_artifacts == expected_artifacts.resolve()
-        or expected_workspace_dir.resolve() in curr_artifacts.parents
-    ):
+    # Check artifacts co-scoping & canonical identity
+    if curr_artifacts != expected_artifacts:
         issues.append(
-            f"Artifacts directory ({curr_artifacts}) does not reside within season workspace ({expected_workspace_dir.resolve()})"
+            f"Artifacts directory ({curr_artifacts}) differs from canonical season artifacts directory ({expected_artifacts})."
         )
 
-    # Check disagreement with .env if present
-    target_env = env_file or (root / ".env")
+    # Check disagreement with .env if present — scoped strictly to WORKSPACE_ENV_KEYS
+    target_env = env_file or get_default_env_file()
     if target_env.is_file():
         try:
             for line in target_env.read_text(encoding="utf-8").splitlines():
@@ -243,7 +279,8 @@ def check_workspace_status(
                     k, v = line.split("=", 1)
                     k = k.strip()
                     v = v.strip().strip("\"'")
-                    if k in os.environ:
+                    # ONLY evaluate workspace-relevant keys; ignore unrelated variables (e.g. DATABASE_URL, SECRET_KEY)
+                    if k in WORKSPACE_ENV_KEYS and k in os.environ:
                         active_v = os.environ[k]
                         p_active = Path(active_v)
                         if not p_active.is_absolute():
@@ -269,6 +306,7 @@ def check_workspace_status(
         "expected_workspace_dir": str(expected_workspace_dir),
         "expected_champion_manifest": str(expected_manifest),
         "expected_database": str(expected_db),
+        "expected_artifacts": str(expected_artifacts),
         "is_isolated": is_isolated,
         "is_legacy": is_legacy,
         "issues": issues,
@@ -332,8 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Data Directory:      {info['effective_data_dir']}")
     print(f"  Champion Manifest:   {info['effective_champion_manifest']}")
     print(f"  Database Path:       {info['effective_database']}")
+    print(f"  Artifacts Directory: {info['effective_artifacts']}")
     if not args.no_dotenv:
-        print("  Persisted to:        .env (persists across shells and tools)")
+        print(f"  Persisted to:        {get_default_env_file()} (persists across shells and tools)")
     print("-" * 65)
     print("Shell Environment Overrides (optional if .env is present):")
     print("  PowerShell:")
