@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from battlelab.adapters import get_adapter, list_adapters
 from battlelab.analysis.metrics import calculate_tournament_metrics
@@ -382,6 +385,273 @@ def cmd_champion(args: argparse.Namespace) -> int:
         print(f"  Created At:      {champ.created_at}")
         return 0
 
+    elif args.action == "init":
+        root = get_project_root()
+        manifest_path = get_champion_manifest_path()
+        legacy_manifest_path = (root / "bots" / "champion" / "champion_manifest.json").resolve()
+        legacy_data_dir = (root / "data").resolve()
+        legacy_db_path = (legacy_data_dir / "battlelab.db").resolve()
+
+        curr_manifest_path = manifest_path.resolve()
+        curr_data_dir = get_data_dir().resolve()
+        curr_db_path = db.db_path.resolve()
+
+        if curr_manifest_path == legacy_manifest_path:
+            print(
+                "Error: Cannot initialize official Champion v0 into tracked repository default manifest "
+                f"({legacy_manifest_path}). An isolated season competition workspace is required. "
+                "Activate a workspace via 'python scripts/competition_workspace.py' or set BATTLELAB_DATA_DIR "
+                "and BATTLELAB_CHAMPION_MANIFEST.",
+                file=sys.stderr,
+            )
+            return 1
+
+        if curr_data_dir == legacy_data_dir:
+            print(
+                "Error: Cannot initialize official Champion v0 in default repository data directory "
+                f"({legacy_data_dir}). An isolated season competition workspace is required. "
+                "Activate a workspace via 'python scripts/competition_workspace.py' or set BATTLELAB_DATA_DIR.",
+                file=sys.stderr,
+            )
+            return 1
+
+        if curr_db_path == legacy_db_path:
+            print(
+                f"Error: Split workspace detected. Active database ({curr_db_path}) points to legacy "
+                f"repository database while data directory is isolated ({curr_data_dir}). "
+                "Ensure BATTLELAB_DATABASE_PATH (if set) points within the active workspace.",
+                file=sys.stderr,
+            )
+            return 1
+
+        competition_root = (root / "data" / "competition").resolve()
+        if competition_root in curr_data_dir.parents:
+            if not (
+                curr_db_path == (curr_data_dir / "battlelab.db")
+                or curr_data_dir in curr_db_path.parents
+            ):
+                print(
+                    f"Error: Split workspace detected. Active database ({curr_db_path}) is not co-scoped within "
+                    f"the season competition data directory ({curr_data_dir}).",
+                    file=sys.stderr,
+                )
+                return 1
+            if not (
+                curr_manifest_path == (curr_data_dir / "champion_manifest.json")
+                or curr_data_dir in curr_manifest_path.parents
+            ):
+                print(
+                    f"Error: Split workspace detected. Active champion manifest ({curr_manifest_path}) is not co-scoped within "
+                    f"the season competition data directory ({curr_data_dir}).",
+                    file=sys.stderr,
+                )
+                return 1
+
+        if manifest_path.exists():
+            current_champ = registry.get_champion_artifact()
+            if current_champ is not None:
+                print(
+                    f"Error: Champion is already initialized (current: {current_champ.artifact_id}). "
+                    "Use 'battlelab experiment promote' or 'battlelab champion rollback'.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Error: Existing champion manifest found at {manifest_path} but active champion is invalid or corrupted. "
+                    "First-initialization requires a clean, uninitialized state. "
+                    "Explicit recovery required (inspect or remove corrupted manifest).",
+                    file=sys.stderr,
+                )
+            return 1
+
+        promotions = db.list_promotions()
+        if promotions:
+            print(
+                "Error: Existing promotion history found in database. "
+                "First-initialization requires a clean, uninitialized state. "
+                "Use 'battlelab champion rollback' to restore a valid champion or inspect database.",
+                file=sys.stderr,
+            )
+            return 1
+
+        lock_path = manifest_path.with_suffix(".init.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with open(fd, "w", encoding="utf-8") as lock_f:
+                lock_f.write(f"{os.getpid()}\n")
+        except FileExistsError:
+            print(
+                "Error: Concurrent champion initialization detected or active initialization lock exists. "
+                f"Lock file: {lock_path}",
+                file=sys.stderr,
+            )
+            return 1
+
+        try:
+            if manifest_path.exists():
+                print(
+                    "Error: Champion manifest was created concurrently.",
+                    file=sys.stderr,
+                )
+                return 1
+            if db.list_promotions():
+                print(
+                    "Error: Promotion was recorded concurrently in database.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            try:
+                art = registry.get_artifact(args.artifact_id)
+            except Exception:
+                art = None
+            if not art:
+                print(f"Error: Artifact not found: {args.artifact_id}", file=sys.stderr)
+                return 1
+
+            from battlelab.bots.artifacts import verify_artifact_integrity
+
+            ok, err = verify_artifact_integrity(art)
+            if not ok:
+                print(f"Error: Artifact integrity check failed: {err}", file=sys.stderr)
+                return 1
+
+            actor = getattr(args, "actor", "")
+            if (
+                not actor
+                or not actor.strip()
+                or actor.strip().lower() in ("human", "default", "unknown", "system", "root")
+            ):
+                print(
+                    "Error: Initializing champion requires an explicit, named non-generic actor (e.g. researcher username).",
+                    file=sys.stderr,
+                )
+                return 1
+
+            reason = getattr(args, "reason", "")
+            if not reason or len(reason.strip()) < 10:
+                print(
+                    "Error: Initializing champion requires an explicit reason (>= 10 characters).",
+                    file=sys.stderr,
+                )
+                return 1
+
+            from battlelab.official.readiness import OfficialReadinessChecker
+
+            allow_unverified = getattr(args, "allow_unverified_adapter", False)
+            checker = OfficialReadinessChecker()
+            try:
+                report = checker.evaluate()
+                adapter_ready = report.can_run_local
+            except Exception:
+                report = None
+                adapter_ready = False
+
+            if not adapter_ready:
+                if not allow_unverified:
+                    blockers_str = (
+                        f" (blockers: {', '.join(report.blockers[:5])})"
+                        if (report and report.blockers)
+                        else ""
+                    )
+                    print(
+                        f"Error: Official adapter is not verified for local execution{blockers_str}. "
+                        "Ordinary use cannot mark a candidate as official Champion v0 without verified official readiness. "
+                        "To proceed during preliminary development without implied submission readiness, "
+                        "explicitly specify --allow-unverified-adapter.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                promotion_mode = "INITIAL_CHAMPION_V0_UNVERIFIED_OVERRIDE"
+                override_ack: str | None = (
+                    "OPERATOR_OVERRIDE: Initialized Champion v0 with unverified official adapter. "
+                    "NO SUBMISSION READINESS IMPLIED."
+                )
+                gate_violations = (
+                    report.blockers
+                    if (report and report.blockers)
+                    else ["OFFICIAL_ADAPTER_NOT_LOCAL_READY"]
+                )
+            else:
+                promotion_mode = "INITIAL_CHAMPION_V0"
+                override_ack = None
+                gate_violations = []
+
+            clean_actor = actor.strip()
+            clean_reason = reason.strip()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            init_reason = f"Initial Champion v0: {clean_reason}"
+
+            promotion_id = (
+                f"prom_init_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
+            )
+            manifest_payload = {
+                "champion_artifact_id": art.artifact_id,
+                "experiment_id": None,
+                "previous_champion_id": None,
+                "updated_at": now_iso,
+                "reason": init_reason,
+            }
+
+            try:
+                db.save_promotion(
+                    promotion_id=promotion_id,
+                    experiment_id=None,
+                    artifact_id=art.artifact_id,
+                    promoted_at=now_iso,
+                    manifest_snapshot=manifest_payload,
+                    reason=init_reason,
+                    mode=promotion_mode,
+                    promoted_by=clean_actor,
+                    override_acknowledgement=override_ack,
+                    previous_champion_id=None,
+                    gate_violations=gate_violations,
+                    artifact_manifest_hash=art.manifest_hash,
+                )
+            except Exception as e:
+                print(
+                    f"Error: Failed to record promotion audit in database: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            try:
+                registry.update_champion_manifest(
+                    artifact_id=art.artifact_id,
+                    experiment_id=None,
+                    updated_at=now_iso,
+                    reason=init_reason,
+                    previous_champion_id=None,
+                )
+            except Exception as e:
+                try:
+                    with db.connect() as conn:
+                        with conn:
+                            conn.execute(
+                                "DELETE FROM promotions WHERE promotion_id = ?",
+                                (promotion_id,),
+                            )
+                except Exception:
+                    pass
+                print(f"Error: Failed to write champion manifest: {e}", file=sys.stderr)
+                return 1
+
+            print(f"Successfully INITIALIZED Champion v0 to {art.artifact_id} ({art.display_name})")
+            print(f"  Promoted By: {clean_actor}")
+            print(f"  Audit ID:    {promotion_id}")
+            print(f"  Mode:        {promotion_mode}")
+            if override_ack:
+                print(f"  Notice:      {override_ack}")
+            return 0
+        finally:
+            try:
+                if lock_path.exists():
+                    lock_path.unlink()
+            except OSError:
+                pass
+
     elif args.action == "rollback":
         reason = getattr(args, "reason", "")
         actor = getattr(args, "actor", "")
@@ -584,6 +854,125 @@ def cmd_official(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_competition(args: argparse.Namespace) -> int:
+    """Competition launch kit operational status."""
+    if args.action == "status":
+        from battlelab.config.loader import load_yaml_config
+        from battlelab.official.readiness import OfficialReadinessChecker
+
+        state_file = get_project_root() / "competition" / "COMPETITION_STATE.yaml"
+        state: dict[str, Any] = {}
+        if state_file.exists():
+            try:
+                state = load_yaml_config(state_file)
+            except Exception as e:
+                print(f"Warning: error loading competition state: {e}", file=sys.stderr)
+
+        # Authoritative subsystem queries
+        checker = OfficialReadinessChecker()
+        report = checker.evaluate()
+
+        registry = BotRegistry()
+        champ = registry.get_champion_artifact()
+
+        adapter_name = "official"
+        try:
+            adapter = get_adapter(adapter_name)
+            caps = adapter.get_capabilities()
+            adapter_info: dict[str, Any] = {
+                "name": adapter.name,
+                "can_run_local": caps.can_run_local,
+                "can_submit": caps.can_submit,
+            }
+        except Exception as e:
+            adapter_info = {
+                "name": adapter_name,
+                "error": str(e),
+                "can_run_local": False,
+                "can_submit": False,
+            }
+
+        status_data: dict[str, Any] = {
+            "workflow": state.get("workflow", {}),
+            "operator_decisions": state.get("operator_decisions", {}),
+            "submission_controls": state.get("submission_controls", {}),
+            "authoritative": {
+                "workspace": {
+                    "data_dir": str(get_data_dir()),
+                    "champion_manifest": str(get_champion_manifest_path()),
+                },
+                "official_readiness": {
+                    "ready": report.ready,
+                    "can_run_local": report.can_run_local,
+                    "can_submit": report.can_submit,
+                    "source_bundle_hash": report.source_bundle_hash,
+                    "spec_hash": report.spec_hash,
+                    "sdk_version": report.sdk_version,
+                    "blockers_count": len(report.blockers),
+                    "blockers": report.blockers,
+                },
+                "champion": {
+                    "active": champ is not None,
+                    "artifact_id": champ.artifact_id if champ else None,
+                    "name": champ.display_name if champ else None,
+                },
+                "adapter": adapter_info,
+            },
+        }
+
+        if getattr(args, "json", False):
+            print(json.dumps(status_data, indent=2))
+            return 0
+
+        print("=" * 65)
+        print("BATTLELAB COMPETITION STATUS")
+        print("=" * 65)
+        wf = status_data["workflow"]
+        print("OPERATIONAL WORKFLOW PROGRESS (Operator-reported, Untrusted):")
+        print(f"  Reported Phase:       {wf.get('current_phase', 'UNKNOWN')}")
+        print(f"  Reported Status:      {wf.get('status', 'UNKNOWN')}")
+        print(f"  Reported Next Action: {wf.get('next_action', 'None')}")
+        print("-" * 65)
+        print("AUTHORITATIVE SUBSYSTEM READINESS (System-verified):")
+        print(f"  Active Data Dir:        {get_data_dir()}")
+        print(f"  Champion Manifest:      {get_champion_manifest_path()}")
+        off = status_data["authoritative"]["official_readiness"]
+        print(f"  Official Integration:   {'READY' if off['ready'] else 'NOT READY'}")
+        print(f"  Official Can Run Local: {'YES' if off['can_run_local'] else 'NO'}")
+        print(f"  Official Can Submit:    {'YES' if off['can_submit'] else 'NO'}")
+        print(f"  Source Bundle Hash:     {off['source_bundle_hash'] or 'None'}")
+        print(f"  Game Spec Hash:         {off['spec_hash'] or 'None'}")
+        print(f"  Official SDK Version:   {off['sdk_version'] or 'Unreleased'}")
+        if off["blockers"]:
+            print(f"  Active Blockers ({len(off['blockers'])}):")
+            for b in off["blockers"][:5]:
+                print(f"    - {b}")
+            if len(off["blockers"]) > 5:
+                print(f"    ... and {len(off['blockers']) - 5} more.")
+
+        adp = status_data["authoritative"]["adapter"]
+        adp_ready_str = (
+            "READY" if (adp.get("can_run_local") and not adp.get("error")) else "NOT READY"
+        )
+        print(f"  Official Adapter:       {adp_ready_str} (name: {adp['name']})")
+
+        champ_info = status_data["authoritative"]["champion"]
+        champ_str = f"ACTIVE ({champ_info['artifact_id']})" if champ_info["active"] else "NONE"
+        print(f"  Champion Artifact:      {champ_str}")
+
+        sub = status_data["submission_controls"]
+        approval = (
+            "Required"
+            if sub.get("operator_approval_required", True)
+            else "DISALLOWED (must be required)"
+        )
+        print(f"  Submission Approval:    {approval}")
+        print("=" * 65)
+        return 0
+
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="battlelab",
@@ -691,6 +1080,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_champ = subparsers.add_parser("champion", help="Champion operations and rollback")
     p_champ_sub = p_champ.add_subparsers(dest="action", required=True)
     p_champ_sub.add_parser("status", help="View active champion")
+    p_champ_init = p_champ_sub.add_parser(
+        "init", help="Initialize Champion v0 when no champion exists"
+    )
+    p_champ_init.add_argument("artifact_id", help="Candidate baseline artifact ID")
+    p_champ_init.add_argument(
+        "--reason", required=True, help="Explicit meaningful reason for initialization"
+    )
+    p_champ_init.add_argument(
+        "--actor", required=True, help="Explicit named identity of actor initializing champion"
+    )
+    p_champ_init.add_argument(
+        "--allow-unverified-adapter",
+        action="store_true",
+        default=False,
+        help="Explicit operator override to initialize Champion v0 before official adapter local verification is complete (audit logged, no submission readiness implied)",
+    )
     p_champ_rb = p_champ_sub.add_parser(
         "rollback", help="Roll back champion to a historical artifact"
     )
@@ -772,6 +1177,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_off_act.add_argument("--acknowledge-sdk", help="Explicit acknowledgement token")
     p_off_act.add_argument("--json", action="store_true", help="Output activation report as JSON")
 
+    # competition
+    p_comp = subparsers.add_parser("competition", help="Competition launch kit operations")
+    p_comp_sub = p_comp.add_subparsers(dest="action", required=True)
+    p_comp_stat = p_comp_sub.add_parser("status", help="Competition operational state")
+    p_comp_stat.add_argument("--json", action="store_true", help="Output status as JSON")
+
     parsed = parser.parse_args(argv)
 
     if parsed.command == "doctor":
@@ -794,6 +1205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_replay(parsed)
     elif parsed.command == "official":
         return cmd_official(parsed)
+    elif parsed.command == "competition":
+        return cmd_competition(parsed)
 
     return 0
 

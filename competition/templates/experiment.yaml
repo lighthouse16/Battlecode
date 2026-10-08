@@ -1,0 +1,36 @@
+# Competition Strategy Experiment Template
+# Falsifiable hypothesis-driven evaluation configuration.
+# Evaluates challenger artifact against current champion and opponent pool.
+
+experiment_id: null
+parent_champion: null
+hypothesis: ""
+change_scope: ""
+expected_effect: ""
+
+# Evaluation matrix referencing standard configs/evaluation.yaml and configs/opponent_pool.yaml
+evaluation:
+  config_path: "configs/evaluation.yaml"
+  opponent_pool_path: "configs/opponent_pool.yaml"
+  opponents: []
+  maps: []
+  seeds: []
+  sides:
+    paired: true
+  repetitions: 1
+
+# Promotion gates governance referencing standard configs/promotion.yaml
+promotion:
+  config_path: "configs/promotion.yaml"
+  use_standard_battlelab_gate: true
+
+# Resource and execution limits
+runtime_budget:
+  max_workers: 4
+  wall_clock_limit_seconds: 1800
+
+result:
+  status: NOT_RUN
+  evaluated_at: null
+  decision: PENDING
+  champion_promoted: false

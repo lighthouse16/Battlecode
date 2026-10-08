@@ -11,6 +11,30 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
+def load_dotenv_workspace(env_file_path: Path | None = None) -> None:
+    """Load season workspace env overrides from .env if present and not already set in environment."""
+    if env_file_path is not None:
+        env_file = env_file_path
+    else:
+        env_override = os.environ.get("BATTLELAB_ENV_FILE")
+        env_file = Path(env_override) if env_override else get_project_root() / ".env"
+    if env_file.is_file():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("\"'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+
+load_dotenv_workspace()
+
+
 def get_data_dir() -> Path:
     data_env = os.environ.get("BATTLELAB_DATA_DIR")
     if data_env:
@@ -106,6 +130,11 @@ def get_champion_manifest_path() -> Path:
         p = Path(manifest_env)
         if not p.is_absolute():
             p = get_project_root() / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    data_env = os.environ.get("BATTLELAB_DATA_DIR")
+    if data_env:
+        p = get_data_dir() / "champion_manifest.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
     p = get_project_root() / "bots" / "champion" / "champion_manifest.json"
