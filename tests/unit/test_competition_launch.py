@@ -6,6 +6,7 @@ GameSpec conformance, authoritative status reporting, and fail-closed edge cases
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -1260,29 +1261,51 @@ def test_fresh_subprocess_re_entry_persistence(tmp_path: Path):
     import sys
 
     root = get_project_root()
+    root_env = root / ".env"
+    root_env_existed_before = root_env.is_file()
+    root_env_bytes_before = root_env.read_bytes() if root_env_existed_before else None
+    root_env_hash_before = (
+        hashlib.sha256(root_env_bytes_before).hexdigest() if root_env_bytes_before else None
+    )
+
+    # 1. Verify fresh subprocess behavior when workspace .env is absent
+    absent_env = tmp_path / "absent.env"
+    clean_env_absent = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
+    clean_env_absent["BATTLELAB_ENV_FILE"] = str(absent_env)
+
+    cmd = [sys.executable, "-m", "battlelab", "competition", "status", "--json"]
+    proc_absent = subprocess.run(
+        cmd, cwd=root, env=clean_env_absent, capture_output=True, text=True, timeout=30
+    )
+    assert proc_absent.returncode == 0, f"Subprocess absent failed: {proc_absent.stderr}"
+    status_absent = json.loads(proc_absent.stdout)
+    active_ws_absent = status_absent["authoritative"]["workspace"]
+    assert "competition" not in active_ws_absent["data_dir"]
+
+    # 2. Verify fresh subprocess behavior when workspace .env is present
     # Write isolated test .env strictly under tmp_path — NEVER in project root
-    test_env = tmp_path / "test.env"
+    present_env = tmp_path / "test.env"
     season = "subproc_test_2026"
     rel_data_dir = f"data/competition/{season}"
     rel_manifest = f"data/competition/{season}/champion_manifest.json"
 
-    test_env.write_text(
+    present_env.write_text(
         f"BATTLELAB_DATA_DIR={rel_data_dir}\nBATTLELAB_CHAMPION_MANIFEST={rel_manifest}\n",
         encoding="utf-8",
     )
 
-    # Launch fresh subprocess pointing to isolated test_env via BATTLELAB_ENV_FILE
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
-    clean_env["BATTLELAB_ENV_FILE"] = str(test_env)
+    clean_env_present = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
+    clean_env_present["BATTLELAB_ENV_FILE"] = str(present_env)
 
-    cmd = [sys.executable, "-m", "battlelab", "competition", "status", "--json"]
-    proc = subprocess.run(cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30)
-    assert proc.returncode == 0, f"Subprocess failed with stderr: {proc.stderr}"
+    proc_present = subprocess.run(
+        cmd, cwd=root, env=clean_env_present, capture_output=True, text=True, timeout=30
+    )
+    assert proc_present.returncode == 0, f"Subprocess present failed: {proc_present.stderr}"
 
-    status_data = json.loads(proc.stdout)
-    active_ws = status_data["authoritative"]["workspace"]
-    assert season in active_ws["data_dir"]
-    assert season in active_ws["champion_manifest"]
+    status_present = json.loads(proc_present.stdout)
+    active_ws_present = status_present["authoritative"]["workspace"]
+    assert season in active_ws_present["data_dir"]
+    assert season in active_ws_present["champion_manifest"]
 
     # Run scripts/competition_workspace.py --status in fresh subprocess
     ws_cmd = [
@@ -1293,10 +1316,16 @@ def test_fresh_subprocess_re_entry_persistence(tmp_path: Path):
         season,
     ]
     ws_proc = subprocess.run(
-        ws_cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30
+        ws_cmd, cwd=root, env=clean_env_present, capture_output=True, text=True, timeout=30
     )
     assert ws_proc.returncode == 0, f"Workspace status failed: {ws_proc.stderr}"
     assert "Isolated Workspace:      YES" in ws_proc.stdout
 
-    # Assert repo root .env was NEVER created or modified
-    assert not (root / ".env").exists()
+    # Assert repo root .env existence and exact bytes are completely preserved
+    assert root_env.is_file() == root_env_existed_before
+    root_env_bytes_after = root_env.read_bytes() if root_env.is_file() else None
+    root_env_hash_after = (
+        hashlib.sha256(root_env_bytes_after).hexdigest() if root_env_bytes_after else None
+    )
+    assert root_env_bytes_after == root_env_bytes_before
+    assert root_env_hash_after == root_env_hash_before
