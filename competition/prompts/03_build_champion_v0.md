@@ -47,6 +47,7 @@ The goal is **first valid, deterministic, full-match-completing bot**.
    - Register artifact as initial Champion v0 in Battlelab (allowed only when no champion is currently active):
      ```pwsh
      python -m battlelab champion init <artifact_id> --reason "Initial baseline Champion v0" --actor "<operator_name>"
+     # Append --allow-unverified-adapter only if testing before official adapter local verification is complete
      ```
    - Verify champion registration:
      ```pwsh

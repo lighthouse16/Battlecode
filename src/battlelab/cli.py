@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -385,83 +386,211 @@ def cmd_champion(args: argparse.Namespace) -> int:
         return 0
 
     elif args.action == "init":
-        current_champ = registry.get_champion_artifact()
-        if current_champ is not None:
+        manifest_path = get_champion_manifest_path()
+        if manifest_path.exists():
+            current_champ = registry.get_champion_artifact()
+            if current_champ is not None:
+                print(
+                    f"Error: Champion is already initialized (current: {current_champ.artifact_id}). "
+                    "Use 'battlelab experiment promote' or 'battlelab champion rollback'.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Error: Existing champion manifest found at {manifest_path} but active champion is invalid or corrupted. "
+                    "First-initialization requires a clean, uninitialized state. "
+                    "Explicit recovery required (inspect or remove corrupted manifest).",
+                    file=sys.stderr,
+                )
+            return 1
+
+        promotions = db.list_promotions()
+        if promotions:
             print(
-                f"Error: Champion is already initialized (current: {current_champ.artifact_id}). "
-                "Use 'battlelab experiment promote' or 'battlelab champion rollback'.",
+                "Error: Existing promotion history found in database. "
+                "First-initialization requires a clean, uninitialized state. "
+                "Use 'battlelab champion rollback' to restore a valid champion or inspect database.",
+                file=sys.stderr,
+            )
+            return 1
+
+        lock_path = manifest_path.with_suffix(".init.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with open(fd, "w", encoding="utf-8") as lock_f:
+                lock_f.write(f"{os.getpid()}\n")
+        except FileExistsError:
+            print(
+                "Error: Concurrent champion initialization detected or active initialization lock exists. "
+                f"Lock file: {lock_path}",
                 file=sys.stderr,
             )
             return 1
 
         try:
-            art = registry.get_artifact(args.artifact_id)
-        except Exception:
-            art = None
-        if not art:
-            print(f"Error: Artifact not found: {args.artifact_id}", file=sys.stderr)
-            return 1
+            if manifest_path.exists():
+                print(
+                    "Error: Champion manifest was created concurrently.",
+                    file=sys.stderr,
+                )
+                return 1
+            if db.list_promotions():
+                print(
+                    "Error: Promotion was recorded concurrently in database.",
+                    file=sys.stderr,
+                )
+                return 1
 
-        from battlelab.bots.artifacts import verify_artifact_integrity
+            try:
+                art = registry.get_artifact(args.artifact_id)
+            except Exception:
+                art = None
+            if not art:
+                print(f"Error: Artifact not found: {args.artifact_id}", file=sys.stderr)
+                return 1
 
-        ok, err = verify_artifact_integrity(art)
-        if not ok:
-            print(f"Error: Artifact integrity check failed: {err}", file=sys.stderr)
-            return 1
+            from battlelab.bots.artifacts import verify_artifact_integrity
 
-        actor = getattr(args, "actor", "")
-        if (
-            not actor
-            or not actor.strip()
-            or actor.strip().lower() in ("human", "default", "unknown", "system", "root")
-        ):
-            print(
-                "Error: Initializing champion requires an explicit, named non-generic actor (e.g. researcher username).",
-                file=sys.stderr,
+            ok, err = verify_artifact_integrity(art)
+            if not ok:
+                print(f"Error: Artifact integrity check failed: {err}", file=sys.stderr)
+                return 1
+
+            actor = getattr(args, "actor", "")
+            if (
+                not actor
+                or not actor.strip()
+                or actor.strip().lower() in ("human", "default", "unknown", "system", "root")
+            ):
+                print(
+                    "Error: Initializing champion requires an explicit, named non-generic actor (e.g. researcher username).",
+                    file=sys.stderr,
+                )
+                return 1
+
+            reason = getattr(args, "reason", "")
+            if not reason or len(reason.strip()) < 10:
+                print(
+                    "Error: Initializing champion requires an explicit reason (>= 10 characters).",
+                    file=sys.stderr,
+                )
+                return 1
+
+            from battlelab.official.readiness import OfficialReadinessChecker
+
+            allow_unverified = getattr(args, "allow_unverified_adapter", False)
+            checker = OfficialReadinessChecker()
+            try:
+                report = checker.evaluate()
+                adapter_ready = report.can_run_local
+            except Exception:
+                report = None
+                adapter_ready = False
+
+            if not adapter_ready:
+                if not allow_unverified:
+                    blockers_str = (
+                        f" (blockers: {', '.join(report.blockers[:5])})"
+                        if (report and report.blockers)
+                        else ""
+                    )
+                    print(
+                        f"Error: Official adapter is not verified for local execution{blockers_str}. "
+                        "Ordinary use cannot mark a candidate as official Champion v0 without verified official readiness. "
+                        "To proceed during preliminary development without implied submission readiness, "
+                        "explicitly specify --allow-unverified-adapter.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                promotion_mode = "INITIAL_CHAMPION_V0_UNVERIFIED_OVERRIDE"
+                override_ack: str | None = (
+                    "OPERATOR_OVERRIDE: Initialized Champion v0 with unverified official adapter. "
+                    "NO SUBMISSION READINESS IMPLIED."
+                )
+                gate_violations = (
+                    report.blockers
+                    if (report and report.blockers)
+                    else ["OFFICIAL_ADAPTER_NOT_LOCAL_READY"]
+                )
+            else:
+                promotion_mode = "INITIAL_CHAMPION_V0"
+                override_ack = None
+                gate_violations = []
+
+            clean_actor = actor.strip()
+            clean_reason = reason.strip()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            init_reason = f"Initial Champion v0: {clean_reason}"
+
+            promotion_id = (
+                f"prom_init_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
             )
-            return 1
+            manifest_payload = {
+                "champion_artifact_id": art.artifact_id,
+                "experiment_id": None,
+                "previous_champion_id": None,
+                "updated_at": now_iso,
+                "reason": init_reason,
+            }
 
-        reason = getattr(args, "reason", "")
-        if not reason or len(reason.strip()) < 10:
-            print(
-                "Error: Initializing champion requires an explicit reason (>= 10 characters).",
-                file=sys.stderr,
-            )
-            return 1
+            try:
+                db.save_promotion(
+                    promotion_id=promotion_id,
+                    experiment_id=None,
+                    artifact_id=art.artifact_id,
+                    promoted_at=now_iso,
+                    manifest_snapshot=manifest_payload,
+                    reason=init_reason,
+                    mode=promotion_mode,
+                    promoted_by=clean_actor,
+                    override_acknowledgement=override_ack,
+                    previous_champion_id=None,
+                    gate_violations=gate_violations,
+                    artifact_manifest_hash=art.manifest_hash,
+                )
+            except Exception as e:
+                print(
+                    f"Error: Failed to record promotion audit in database: {e}",
+                    file=sys.stderr,
+                )
+                return 1
 
-        clean_actor = actor.strip()
-        clean_reason = reason.strip()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        init_reason = f"Initial Champion v0: {clean_reason}"
+            try:
+                registry.update_champion_manifest(
+                    artifact_id=art.artifact_id,
+                    experiment_id=None,
+                    updated_at=now_iso,
+                    reason=init_reason,
+                    previous_champion_id=None,
+                )
+            except Exception as e:
+                try:
+                    with db.connect() as conn:
+                        with conn:
+                            conn.execute(
+                                "DELETE FROM promotions WHERE promotion_id = ?",
+                                (promotion_id,),
+                            )
+                except Exception:
+                    pass
+                print(f"Error: Failed to write champion manifest: {e}", file=sys.stderr)
+                return 1
 
-        manifest = registry.update_champion_manifest(
-            artifact_id=art.artifact_id,
-            experiment_id=None,
-            updated_at=now_iso,
-            reason=init_reason,
-            previous_champion_id=None,
-        )
-
-        promotion_id = (
-            f"prom_init_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}"
-        )
-        db.save_promotion(
-            promotion_id=promotion_id,
-            experiment_id=None,
-            artifact_id=art.artifact_id,
-            promoted_at=now_iso,
-            manifest_snapshot=manifest,
-            reason=init_reason,
-            mode="INITIAL_CHAMPION_V0",
-            promoted_by=clean_actor,
-            previous_champion_id=None,
-            artifact_manifest_hash=art.manifest_hash,
-        )
-
-        print(f"Successfully INITIALIZED Champion v0 to {art.artifact_id} ({art.display_name})")
-        print(f"  Promoted By: {clean_actor}")
-        print(f"  Audit ID:    {promotion_id}")
-        return 0
+            print(f"Successfully INITIALIZED Champion v0 to {art.artifact_id} ({art.display_name})")
+            print(f"  Promoted By: {clean_actor}")
+            print(f"  Audit ID:    {promotion_id}")
+            print(f"  Mode:        {promotion_mode}")
+            if override_ack:
+                print(f"  Notice:      {override_ack}")
+            return 0
+        finally:
+            try:
+                if lock_path.exists():
+                    lock_path.unlink()
+            except OSError:
+                pass
 
     elif args.action == "rollback":
         reason = getattr(args, "reason", "")
@@ -894,6 +1023,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_champ_init.add_argument(
         "--actor", required=True, help="Explicit named identity of actor initializing champion"
+    )
+    p_champ_init.add_argument(
+        "--allow-unverified-adapter",
+        action="store_true",
+        default=False,
+        help="Explicit operator override to initialize Champion v0 before official adapter local verification is complete (audit logged, no submission readiness implied)",
     )
     p_champ_rb = p_champ_sub.add_parser(
         "rollback", help="Roll back champion to a historical artifact"

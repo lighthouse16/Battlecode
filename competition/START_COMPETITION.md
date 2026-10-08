@@ -149,6 +149,7 @@ Build the simplest robust legal bot. Objective is zero failures, not high Elo.
   ```pwsh
   python -m battlelab bot register bots/autumn2026/champion_v0/ --name "Champion_v0" --tags "policy:baseline,version:v0"
   python -m battlelab champion init <artifact_id> --reason "Initial baseline Champion v0" --actor "<operator_name>"
+  # Note: During pre-competition development without a verified adapter, append --allow-unverified-adapter
   ```
 - Workflow state marked `CHAMPION_V0_PROMOTED`.
 

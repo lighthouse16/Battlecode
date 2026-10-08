@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -15,8 +16,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from battlelab.bots.registry import BotRegistry
 from battlelab.cli import main as cli_main
-from battlelab.official.models import GameSpec
+from battlelab.official.models import GameSpec, ReadinessReport
 from battlelab.official.sources import ingest_sources, load_source_bundle_manifest
 from battlelab.official.spec import (
     REQUIRED_RULE_SECTIONS,
@@ -24,7 +26,8 @@ from battlelab.official.spec import (
     load_and_validate_spec,
     validate_game_spec,
 )
-from battlelab.storage.paths import get_project_root
+from battlelab.storage.database import Database
+from battlelab.storage.paths import get_champion_manifest_path, get_project_root
 from scripts.bootstrap_competition import bootstrap_competition
 from scripts.bootstrap_competition import main as bootstrap_main
 
@@ -210,6 +213,7 @@ def test_cli_competition_status_authoritative_vs_tampered_state(capsys, tmp_path
 def test_champion_init_governance(tmp_path: Path, monkeypatch, capsys):
     """Verify safe Champion v0 initialization flow via CLI."""
     monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    get_champion_manifest_path().unlink(missing_ok=True)
 
     # Register candidate bot
     ret_reg = cli_main(
@@ -269,8 +273,8 @@ def test_champion_init_governance(tmp_path: Path, monkeypatch, capsys):
     assert ret_short == 1
     assert "explicit reason" in capsys.readouterr().err
 
-    # Successful Champion v0 initialization
-    ret_init = cli_main(
+    # Ordinary initialization without verified official adapter must fail closed
+    ret_unverified = cli_main(
         [
             "champion",
             "init",
@@ -281,10 +285,28 @@ def test_champion_init_governance(tmp_path: Path, monkeypatch, capsys):
             "operator_alice",
         ]
     )
+    assert ret_unverified == 1
+    assert "Official adapter is not verified for local execution" in capsys.readouterr().err
+
+    # Explicit override allows initialization during preliminary development
+    ret_init = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+            "--allow-unverified-adapter",
+        ]
+    )
     assert ret_init == 0
     init_out = capsys.readouterr().out
     assert "Successfully INITIALIZED Champion v0" in init_out
     assert art_id in init_out
+    assert "INITIAL_CHAMPION_V0_UNVERIFIED_OVERRIDE" in init_out
+    assert "NO SUBMISSION READINESS IMPLIED" in init_out
 
     # Verify champion is now active
     ret_stat = cli_main(["champion", "status"])
@@ -302,6 +324,7 @@ def test_champion_init_governance(tmp_path: Path, monkeypatch, capsys):
             "Attempt duplicate init",
             "--actor",
             "operator_alice",
+            "--allow-unverified-adapter",
         ]
     )
     assert ret_reinit == 1
@@ -406,3 +429,319 @@ def test_competition_state_and_templates_integrity():
         p = prompts_dir / p_name
         assert p.exists()
         assert len(p.read_text(encoding="utf-8").strip()) > 100
+
+
+def test_champion_init_with_verified_official_adapter_succeeds_without_override(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify champion init succeeds without override flags when official adapter is local-ready."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    get_champion_manifest_path().unlink(missing_ok=True)
+
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Official_Champ_v0",
+            "--tags",
+            "policy:baseline,version:v0",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    mock_report = ReadinessReport(
+        ready=True,
+        can_run_local=True,
+        can_submit=False,
+        blockers=[],
+        checks=[],
+    )
+
+    with patch(
+        "battlelab.official.readiness.OfficialReadinessChecker.evaluate",
+        return_value=mock_report,
+    ):
+        ret_init = cli_main(
+            [
+                "champion",
+                "init",
+                art_id,
+                "--reason",
+                "Official baseline Champion v0",
+                "--actor",
+                "operator_bob",
+            ]
+        )
+        assert ret_init == 0
+        out = capsys.readouterr().out
+        assert "Successfully INITIALIZED Champion v0" in out
+        assert "Mode:        INITIAL_CHAMPION_V0" in out
+        assert "Notice" not in out
+
+    # Verify DB promotion record mode is strictly INITIAL_CHAMPION_V0 and no override acknowledgement
+    db = Database()
+    proms = db.list_promotions()
+    assert len(proms) == 1
+    assert proms[0]["mode"] == "INITIAL_CHAMPION_V0"
+    assert proms[0]["override_acknowledgement"] is None
+    assert proms[0]["gate_violations"] == []
+
+
+def test_champion_init_blocks_on_corrupt_or_orphaned_manifest(tmp_path: Path, monkeypatch, capsys):
+    """Verify champion init fails closed and never overwrites a corrupted or orphaned manifest."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    champ_manifest_path = get_champion_manifest_path()
+    champ_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. Corrupt JSON manifest
+    corrupt_content = '{"champion_artifact_id": "malformed_json_without_closing'
+    champ_manifest_path.write_text(corrupt_content, encoding="utf-8")
+
+    ret_corrupt = cli_main(
+        [
+            "champion",
+            "init",
+            "art_dummy",
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret_corrupt == 1
+    err_corrupt = capsys.readouterr().err
+    assert "Existing champion manifest found" in err_corrupt
+    assert "invalid or corrupted" in err_corrupt
+    # Assert corrupt manifest was NOT overwritten
+    assert champ_manifest_path.read_text(encoding="utf-8") == corrupt_content
+
+    # 2. Valid JSON pointing to unregistered/orphaned artifact
+    orphaned_content = json.dumps({"champion_artifact_id": "art_nonexistent_999"})
+    champ_manifest_path.write_text(orphaned_content, encoding="utf-8")
+
+    ret_orphan = cli_main(
+        [
+            "champion",
+            "init",
+            "art_dummy",
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret_orphan == 1
+    err_orphan = capsys.readouterr().err
+    assert "Existing champion manifest found" in err_orphan
+    assert "invalid or corrupted" in err_orphan
+    assert champ_manifest_path.read_text(encoding="utf-8") == orphaned_content
+
+
+def test_champion_init_blocks_on_existing_promotions_without_manifest(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify champion init fails closed if promotion history exists but manifest is absent."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    get_champion_manifest_path().unlink(missing_ok=True)
+    db = Database()
+    registry = BotRegistry(db)
+    art = registry.register_bot(
+        source_path="bots/baselines/fixed_bot.py",
+        display_name="Historical_Bot",
+    )
+    db.save_promotion(
+        promotion_id="prom_test_existing",
+        experiment_id=None,
+        artifact_id=art.artifact_id,
+        promoted_at="2026-10-08T00:00:00Z",
+        manifest_snapshot={},
+        reason="Historical promotion",
+    )
+
+    champ_manifest_path = get_champion_manifest_path()
+    assert not champ_manifest_path.exists()
+
+    ret = cli_main(
+        [
+            "champion",
+            "init",
+            art.artifact_id,
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret == 1
+    err = capsys.readouterr().err
+    assert "Existing promotion history found in database" in err
+    assert not champ_manifest_path.exists()
+
+
+def test_champion_init_audit_first_fails_closed_on_db_save_failure(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify audit-first fail-closed semantics: DB failure prevents manifest creation."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    get_champion_manifest_path().unlink(missing_ok=True)
+
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Candidate_Fail_DB",
+            "--tags",
+            "policy:baseline",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    champ_manifest_path = get_champion_manifest_path()
+    assert not champ_manifest_path.exists()
+
+    with patch.object(
+        Database,
+        "save_promotion",
+        side_effect=sqlite3.DatabaseError("Injected disk I/O error"),
+    ):
+        ret = cli_main(
+            [
+                "champion",
+                "init",
+                art_id,
+                "--reason",
+                "Initial baseline Champion v0",
+                "--actor",
+                "operator_alice",
+                "--allow-unverified-adapter",
+            ]
+        )
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "Failed to record promotion audit in database" in err
+
+    # Active champion manifest was never created
+    assert not champ_manifest_path.exists()
+    registry = BotRegistry()
+    assert registry.get_champion_artifact() is None
+
+
+def test_champion_init_compensating_rollback_on_manifest_write_failure(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify compensating rollback: manifest failure deletes newly inserted DB audit row."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    get_champion_manifest_path().unlink(missing_ok=True)
+
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Candidate_Fail_Manifest",
+            "--tags",
+            "policy:baseline",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    champ_manifest_path = get_champion_manifest_path()
+    assert not champ_manifest_path.exists()
+
+    with patch.object(
+        BotRegistry,
+        "update_champion_manifest",
+        side_effect=OSError("Injected permission denied writing manifest"),
+    ):
+        ret = cli_main(
+            [
+                "champion",
+                "init",
+                art_id,
+                "--reason",
+                "Initial baseline Champion v0",
+                "--actor",
+                "operator_alice",
+                "--allow-unverified-adapter",
+            ]
+        )
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "Failed to write champion manifest" in err
+
+    # Compensating rollback cleanly purged the promotion row from DB
+    db = Database()
+    assert len(db.list_promotions()) == 0
+    assert not champ_manifest_path.exists()
+
+
+def test_champion_init_single_writer_lock_prevents_race(tmp_path: Path, monkeypatch, capsys):
+    """Verify single-writer mutual exclusion lock blocks concurrent first-initialization."""
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(tmp_path / "data"))
+    get_champion_manifest_path().unlink(missing_ok=True)
+
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Candidate_Race",
+            "--tags",
+            "policy:baseline",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    champ_manifest_path = get_champion_manifest_path()
+    lock_path = champ_manifest_path.with_suffix(".init.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("99999\n", encoding="utf-8")
+
+    ret_race = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Initial baseline Champion v0",
+            "--actor",
+            "operator_alice",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret_race == 1
+    err = capsys.readouterr().err
+    assert "Concurrent champion initialization detected" in err
+    assert not champ_manifest_path.exists()
+
+    # Lock file is preserved as evidence and not forcibly deleted by failing caller
+    assert lock_path.exists()
