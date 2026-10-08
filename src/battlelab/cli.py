@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from battlelab.adapters import get_adapter, list_adapters
 from battlelab.analysis.metrics import calculate_tournament_metrics
@@ -584,6 +584,118 @@ def cmd_official(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_competition(args: argparse.Namespace) -> int:
+    """Competition launch kit operational status."""
+    if args.action == "status":
+        from battlelab.config.loader import load_yaml_config
+        from battlelab.official.readiness import OfficialReadinessChecker
+
+        state_file = get_project_root() / "competition" / "COMPETITION_STATE.yaml"
+        state: dict[str, Any] = {}
+        if state_file.exists():
+            try:
+                state = load_yaml_config(state_file)
+            except Exception as e:
+                print(f"Warning: error loading competition state: {e}", file=sys.stderr)
+
+        # Authoritative subsystem queries
+        checker = OfficialReadinessChecker()
+        report = checker.evaluate()
+
+        registry = BotRegistry()
+        champ = registry.get_champion_artifact()
+
+        adapter_name = "official"
+        try:
+            adapter = get_adapter(adapter_name)
+            caps = adapter.get_capabilities()
+            adapter_info: dict[str, Any] = {
+                "name": adapter.name,
+                "can_run_local": caps.can_run_local,
+                "can_submit": caps.can_submit,
+            }
+        except Exception as e:
+            adapter_info = {
+                "name": adapter_name,
+                "error": str(e),
+                "can_run_local": False,
+                "can_submit": False,
+            }
+
+        status_data: dict[str, Any] = {
+            "workflow": state.get("workflow", {}),
+            "operator_decisions": state.get("operator_decisions", {}),
+            "submission_controls": state.get("submission_controls", {}),
+            "authoritative": {
+                "official_readiness": {
+                    "ready": report.ready,
+                    "can_run_local": report.can_run_local,
+                    "can_submit": report.can_submit,
+                    "source_bundle_hash": report.source_bundle_hash,
+                    "spec_hash": report.spec_hash,
+                    "sdk_version": report.sdk_version,
+                    "blockers_count": len(report.blockers),
+                    "blockers": report.blockers,
+                },
+                "champion": {
+                    "active": champ is not None,
+                    "artifact_id": champ.artifact_id if champ else None,
+                    "name": champ.display_name if champ else None,
+                },
+                "adapter": adapter_info,
+            },
+        }
+
+        if getattr(args, "json", False):
+            print(json.dumps(status_data, indent=2))
+            return 0
+
+        print("=" * 65)
+        print("BATTLELAB COMPETITION OPERATIONAL STATUS")
+        print("=" * 65)
+        wf = status_data["workflow"]
+        print(f"Workflow Phase:         {wf.get('current_phase', 'UNKNOWN')}")
+        print(f"Workflow Status:        {wf.get('status', 'UNKNOWN')}")
+        print(f"Next Action:            {wf.get('next_action', 'None')}")
+        print("-" * 65)
+        print("AUTHORITATIVE SUBSYSTEMS:")
+        off = status_data["authoritative"]["official_readiness"]
+        print(f"Official Integration:   {'READY' if off['ready'] else 'NOT READY'}")
+        print(f"Official Can Run Local: {'YES' if off['can_run_local'] else 'NO'}")
+        print(f"Official Can Submit:    {'YES' if off['can_submit'] else 'NO'}")
+        print(f"Source Bundle Hash:     {off['source_bundle_hash'] or 'None'}")
+        print(f"Game Spec Hash:         {off['spec_hash'] or 'None'}")
+        print(f"Official SDK Version:   {off['sdk_version'] or 'Unreleased'}")
+        if off["blockers"]:
+            print(f"Active Blockers ({len(off['blockers'])}):")
+            for b in off["blockers"][:5]:
+                print(f"  - {b}")
+            if len(off["blockers"]) > 5:
+                print(f"  ... and {len(off['blockers']) - 5} more.")
+
+        adp = status_data["authoritative"]["adapter"]
+        adp_ready_str = (
+            "READY" if (adp.get("can_run_local") and not adp.get("error")) else "NOT READY"
+        )
+        print(f"Official Adapter:       {adp_ready_str} (name: {adp['name']})")
+
+        champ_info = status_data["authoritative"]["champion"]
+        champ_str = f"ACTIVE ({champ_info['artifact_id']})" if champ_info["active"] else "NONE"
+        print(f"Champion Artifact:      {champ_str}")
+
+        sub = status_data["submission_controls"]
+        approval = (
+            "Required"
+            if sub.get("operator_approval_required", True)
+            else "DISALLOWED (must be required)"
+        )
+        print(f"Submission Approval:    {approval}")
+        print("=" * 65)
+        return 0
+
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="battlelab",
@@ -772,6 +884,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_off_act.add_argument("--acknowledge-sdk", help="Explicit acknowledgement token")
     p_off_act.add_argument("--json", action="store_true", help="Output activation report as JSON")
 
+    # competition
+    p_comp = subparsers.add_parser("competition", help="Competition launch kit operations")
+    p_comp_sub = p_comp.add_subparsers(dest="action", required=True)
+    p_comp_stat = p_comp_sub.add_parser("status", help="Competition operational state")
+    p_comp_stat.add_argument("--json", action="store_true", help="Output status as JSON")
+
     parsed = parser.parse_args(argv)
 
     if parsed.command == "doctor":
@@ -794,6 +912,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_replay(parsed)
     elif parsed.command == "official":
         return cmd_official(parsed)
+    elif parsed.command == "competition":
+        return cmd_competition(parsed)
 
     return 0
 

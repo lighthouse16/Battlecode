@@ -1,0 +1,17 @@
+# Battlecode Competition Launch Operational State
+# Tracks operator workflow progress, next actions, and unresolved human decisions.
+# Authoritative state (hashes, readiness, champion, experiments) is managed
+# exclusively by the official subsystem and Battlelab database.
+
+workflow:
+  current_phase: "PHASE_A_INGEST"
+  status: "WAITING_FOR_OFFICIAL_MATERIALS"
+  next_action: "Ingest official materials via scripts/bootstrap_competition.py or battlelab official ingest"
+
+operator_decisions:
+  unresolved: []
+  notes: "Awaiting release of official Autumn competition materials."
+
+submission_controls:
+  operator_approval_required: true
+  manual_submission_authorized: false
