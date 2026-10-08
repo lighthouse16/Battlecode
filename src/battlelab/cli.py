@@ -386,9 +386,17 @@ def cmd_champion(args: argparse.Namespace) -> int:
         return 0
 
     elif args.action == "init":
+        root = get_project_root()
         manifest_path = get_champion_manifest_path()
-        legacy_manifest_path = get_project_root() / "bots" / "champion" / "champion_manifest.json"
-        if manifest_path.resolve() == legacy_manifest_path.resolve():
+        legacy_manifest_path = (root / "bots" / "champion" / "champion_manifest.json").resolve()
+        legacy_data_dir = (root / "data").resolve()
+        legacy_db_path = (legacy_data_dir / "battlelab.db").resolve()
+
+        curr_manifest_path = manifest_path.resolve()
+        curr_data_dir = get_data_dir().resolve()
+        curr_db_path = db.db_path.resolve()
+
+        if curr_manifest_path == legacy_manifest_path:
             print(
                 "Error: Cannot initialize official Champion v0 into tracked repository default manifest "
                 f"({legacy_manifest_path}). An isolated season competition workspace is required. "
@@ -397,6 +405,47 @@ def cmd_champion(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+
+        if curr_data_dir == legacy_data_dir:
+            print(
+                "Error: Cannot initialize official Champion v0 in default repository data directory "
+                f"({legacy_data_dir}). An isolated season competition workspace is required. "
+                "Activate a workspace via 'python scripts/competition_workspace.py' or set BATTLELAB_DATA_DIR.",
+                file=sys.stderr,
+            )
+            return 1
+
+        if curr_db_path == legacy_db_path:
+            print(
+                f"Error: Split workspace detected. Active database ({curr_db_path}) points to legacy "
+                f"repository database while data directory is isolated ({curr_data_dir}). "
+                "Ensure BATTLELAB_DATABASE_PATH (if set) points within the active workspace.",
+                file=sys.stderr,
+            )
+            return 1
+
+        competition_root = (root / "data" / "competition").resolve()
+        if competition_root in curr_data_dir.parents:
+            if not (
+                curr_db_path == (curr_data_dir / "battlelab.db")
+                or curr_data_dir in curr_db_path.parents
+            ):
+                print(
+                    f"Error: Split workspace detected. Active database ({curr_db_path}) is not co-scoped within "
+                    f"the season competition data directory ({curr_data_dir}).",
+                    file=sys.stderr,
+                )
+                return 1
+            if not (
+                curr_manifest_path == (curr_data_dir / "champion_manifest.json")
+                or curr_data_dir in curr_manifest_path.parents
+            ):
+                print(
+                    f"Error: Split workspace detected. Active champion manifest ({curr_manifest_path}) is not co-scoped within "
+                    f"the season competition data directory ({curr_data_dir}).",
+                    file=sys.stderr,
+                )
+                return 1
 
         if manifest_path.exists():
             current_champ = registry.get_champion_artifact()

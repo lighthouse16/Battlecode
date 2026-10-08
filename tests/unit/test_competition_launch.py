@@ -924,11 +924,20 @@ def test_scripts_competition_workspace_helper(tmp_path: Path, monkeypatch, capsy
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    # Test status before isolation
+    # Test status before isolation (legacy fallback)
     monkeypatch.delenv("BATTLELAB_DATA_DIR", raising=False)
     monkeypatch.delenv("BATTLELAB_CHAMPION_MANIFEST", raising=False)
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("BATTLELAB_ARTIFACTS_DIR", raising=False)
     status_uniso = mod.check_workspace_status("autumn2026")
     assert status_uniso["is_isolated"] is False
+    assert status_uniso["is_legacy"] is True
+
+    # CLI status before isolation exits 1 (nonzero on mismatch/legacy)
+    ret_uniso_cli = mod.main(["--status", "--season", "autumn2026"])
+    assert ret_uniso_cli == 1
+    uniso_out = capsys.readouterr().out
+    assert "Isolated Workspace:      NO" in uniso_out
 
     # Test init_workspace without dotenv writing
     info = mod.init_workspace("test_season_2026", write_dotenv=False)
@@ -938,10 +947,263 @@ def test_scripts_competition_workspace_helper(tmp_path: Path, monkeypatch, capsy
     # Test status after initialization
     status_iso = mod.check_workspace_status("test_season_2026")
     assert status_iso["is_isolated"] is True
+    assert status_iso["is_legacy"] is False
+    assert len(status_iso["issues"]) == 0
 
-    # Test CLI --status
-    ret_cli_stat = mod.main(["--status"])
+    # Test CLI --status after initialization
+    ret_cli_stat = mod.main(["--status", "--season", "test_season_2026"])
     assert ret_cli_stat == 0
     out = capsys.readouterr().out
     assert "BATTLELAB COMPETITION WORKSPACE STATUS:" in out
     assert "Isolated Workspace:      YES" in out
+
+
+def test_dotenv_preserves_unrelated_content_and_idempotence(tmp_path: Path):
+    """Verify update_dotenv_file preserves unrelated keys, comments, and is strictly idempotent."""
+    import importlib.util
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    test_env = tmp_path / ".env"
+    initial_content = (
+        "# Deployment secrets\n"
+        "DATABASE_URL=postgres://user:pass@localhost/db\n"
+        "SECRET_KEY=super_secret_key_12345\n"
+        "\n"
+        "# Another existing comment\n"
+        "ANOTHER_VAR=value_abc\n"
+    )
+    test_env.write_text(initial_content, encoding="utf-8")
+
+    # Update with workspace keys
+    mod.update_dotenv_file(
+        env_file=test_env,
+        updates={
+            "BATTLELAB_DATA_DIR": "data/competition/autumn2026",
+            "BATTLELAB_CHAMPION_MANIFEST": "data/competition/autumn2026/champion_manifest.json",
+        },
+        comment_header="# Battlecode Competition Workspace — autumn2026",
+    )
+
+    first_update_content = test_env.read_text(encoding="utf-8")
+    assert "# Deployment secrets" in first_update_content
+    assert "DATABASE_URL=postgres://user:pass@localhost/db" in first_update_content
+    assert "SECRET_KEY=super_secret_key_12345" in first_update_content
+    assert "ANOTHER_VAR=value_abc" in first_update_content
+    assert "BATTLELAB_DATA_DIR=data/competition/autumn2026" in first_update_content
+    assert (
+        "BATTLELAB_CHAMPION_MANIFEST=data/competition/autumn2026/champion_manifest.json"
+        in first_update_content
+    )
+
+    # Idempotent second update: content must be byte-identical
+    mod.update_dotenv_file(
+        env_file=test_env,
+        updates={
+            "BATTLELAB_DATA_DIR": "data/competition/autumn2026",
+            "BATTLELAB_CHAMPION_MANIFEST": "data/competition/autumn2026/champion_manifest.json",
+        },
+        comment_header="# Battlecode Competition Workspace — autumn2026",
+    )
+    second_update_content = test_env.read_text(encoding="utf-8")
+    assert second_update_content == first_update_content
+
+
+def test_split_workspace_and_mis_scoped_db_detection(tmp_path: Path, monkeypatch, capsys):
+    """Verify split database / mis-scoped workspace is detected by --status and rejected by champion init."""
+    import importlib.util
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    root = get_project_root()
+    legacy_manifest = root / "bots" / "champion" / "champion_manifest.json"
+    legacy_manifest_orig = legacy_manifest.read_text(encoding="utf-8")
+    legacy_db = root / "data" / "battlelab.db"
+
+    # Configure a split workspace: isolated data dir, but legacy DB
+    season_dir = root / "data" / "competition" / "autumn2026"
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", str(season_dir))
+    monkeypatch.setenv("BATTLELAB_CHAMPION_MANIFEST", str(season_dir / "champion_manifest.json"))
+    monkeypatch.setenv("BATTLELAB_DATABASE_PATH", str(legacy_db))
+
+    # check_workspace_status detects split database
+    status = mod.check_workspace_status("autumn2026")
+    assert status["is_isolated"] is False
+    assert any("split" in issue.lower() or "legacy" in issue.lower() for issue in status["issues"])
+
+    # CLI --status exits 1 on split workspace
+    ret_cli = mod.main(["--status", "--season", "autumn2026"])
+    assert ret_cli == 1
+    out = capsys.readouterr().out
+    assert "Isolated Workspace:      NO (mis-scoped / split configuration)" in out
+
+    # Register candidate bot into isolated season workspace (using temporary workspace DB)
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+    ret_reg = cli_main(
+        [
+            "bot",
+            "register",
+            "bots/baselines/fixed_bot.py",
+            "--name",
+            "Split_Test_Bot",
+        ]
+    )
+    assert ret_reg == 0
+    import re
+
+    match = re.search(r"Artifact ID:\s+(art_[a-f0-9]+)", capsys.readouterr().out)
+    assert match is not None
+    art_id = match.group(1)
+
+    # Re-inject the split database override
+    monkeypatch.setenv("BATTLELAB_DATABASE_PATH", str(legacy_db))
+
+    # champion init must fail closed on split workspace
+    ret_init = cli_main(
+        [
+            "champion",
+            "init",
+            art_id,
+            "--reason",
+            "Attempt init on split workspace",
+            "--actor",
+            "lead_researcher",
+            "--allow-unverified-adapter",
+        ]
+    )
+    assert ret_init == 1
+    err = capsys.readouterr().err
+    assert "Split workspace detected" in err
+
+    # Legacy manifest remains completely untouched
+    assert legacy_manifest.read_text(encoding="utf-8") == legacy_manifest_orig
+
+
+def test_invalid_season_slug_rejected():
+    """Verify validate_season_slug rejects traversal, slashes, spaces, and empty identifiers."""
+    import importlib.util
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    for bad in [
+        "../../etc",
+        "../..",
+        "/tmp/foo",
+        "foo/bar",
+        "season\\sub",
+        "",
+        "   ",
+        "has space",
+        "@bad#season",
+    ]:
+        with pytest.raises(ValueError):
+            mod.validate_season_slug(bad)
+
+    # Valid slugs
+    assert mod.validate_season_slug("autumn2026") == "autumn2026"
+    assert mod.validate_season_slug("season_2026-v1") == "season_2026-v1"
+
+    # CLI exits 1 on invalid season
+    assert mod.main(["--season", "../../escape"]) == 1
+    assert mod.main(["--status", "--season", "../escape"]) == 1
+
+
+def test_contradictory_env_overrides_fail_closed(monkeypatch):
+    """Verify init_workspace fails closed when contradictory env vars are already active."""
+    import importlib.util
+
+    ws_script = get_project_root() / "scripts" / "competition_workspace.py"
+    spec = importlib.util.spec_from_file_location("competition_workspace", ws_script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # Contradictory DB override pointing to legacy db
+    root = get_project_root()
+    legacy_db = root / "data" / "battlelab.db"
+    monkeypatch.setenv("BATTLELAB_DATABASE_PATH", str(legacy_db))
+    monkeypatch.delenv("BATTLELAB_DATA_DIR", raising=False)
+    monkeypatch.delenv("BATTLELAB_CHAMPION_MANIFEST", raising=False)
+
+    with pytest.raises(ValueError, match="Contradictory environment overrides detected"):
+        mod.init_workspace("autumn2026", write_dotenv=False)
+
+    # Contradictory data dir pointing to another season
+    monkeypatch.delenv("BATTLELAB_DATABASE_PATH", raising=False)
+    monkeypatch.setenv("BATTLELAB_DATA_DIR", "data/competition/spring2026")
+    with pytest.raises(ValueError, match="Contradictory environment overrides detected"):
+        mod.init_workspace("autumn2026", write_dotenv=False)
+
+
+def test_fresh_subprocess_re_entry_persistence(tmp_path: Path):
+    """Verify fresh OS subprocess correctly reads .env workspace configuration."""
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    root = get_project_root()
+    env_file = root / ".env"
+    existing_env_existed = env_file.exists()
+    saved_content = env_file.read_text(encoding="utf-8") if existing_env_existed else None
+
+    season = "subproc_test_2026"
+    rel_data_dir = f"data/competition/{season}"
+    rel_manifest = f"data/competition/{season}/champion_manifest.json"
+
+    try:
+        env_file.write_text(
+            f"BATTLELAB_DATA_DIR={rel_data_dir}\nBATTLELAB_CHAMPION_MANIFEST={rel_manifest}\n",
+            encoding="utf-8",
+        )
+
+        # Launch fresh subprocess running battlelab competition status --json
+        # Strip BATTLELAB_* variables to simulate a fresh terminal session without test harness fixtures
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("BATTLELAB_")}
+        cmd = [sys.executable, "-m", "battlelab", "competition", "status", "--json"]
+        proc = subprocess.run(
+            cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30
+        )
+        assert proc.returncode == 0, f"Subprocess failed with stderr: {proc.stderr}"
+
+        status_data = json.loads(proc.stdout)
+        active_ws = status_data["authoritative"]["workspace"]
+        assert season in active_ws["data_dir"]
+        assert season in active_ws["champion_manifest"]
+
+        # Run scripts/competition_workspace.py --status in fresh subprocess
+        ws_cmd = [
+            sys.executable,
+            "scripts/competition_workspace.py",
+            "--status",
+            "--season",
+            season,
+        ]
+        ws_proc = subprocess.run(
+            ws_cmd, cwd=root, env=clean_env, capture_output=True, text=True, timeout=30
+        )
+        assert ws_proc.returncode == 0, f"Workspace status failed: {ws_proc.stderr}"
+        assert "Isolated Workspace:      YES" in ws_proc.stdout
+
+    finally:
+        # Restore or clean up .env
+        if existing_env_existed and saved_content is not None:
+            env_file.write_text(saved_content, encoding="utf-8")
+        elif env_file.exists():
+            env_file.unlink(missing_ok=True)
+        # Clean up created test season directory
+        test_season_dir = root / "data" / "competition" / season
+        if test_season_dir.exists():
+            shutil.rmtree(test_season_dir, ignore_errors=True)
